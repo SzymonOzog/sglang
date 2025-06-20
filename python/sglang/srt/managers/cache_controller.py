@@ -592,6 +592,7 @@ class HiCacheController:
                 operation.data = self.mem_pool_host.get_flat_data(
                     operation.host_indices
                 )
+                logger.info(f"Transfering, {operation.device_indices}")
                 self.mem_pool_device.transfer(operation.device_indices, operation.data)
                 self.mem_pool_host.complete_io(operation.host_indices)
                 for node_id in operation.node_ids:

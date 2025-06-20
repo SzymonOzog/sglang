@@ -519,7 +519,11 @@ class HiRadixCache(RadixCache):
         host_hit_length = 0
         last_host_node = last_node
         while last_node.evicted:
-            host_hit_length += len(last_node.host_value)
+            if last_node.l2_backuped:
+                host_hit_length += len(last_node.host_value)
+            if last_node.l3_backuped:
+                host_hit_length += len(last_node.l3_keys) * self.page_size
+
             last_node = last_node.parent
 
         return MatchResult(

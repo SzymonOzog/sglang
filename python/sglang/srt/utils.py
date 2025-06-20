@@ -891,6 +891,18 @@ def prepare_model_and_tokenizer(model_path: str, tokenizer_path: str):
     return model_path, tokenizer_path
 
 
+class StackTraceFormatter(logging.Formatter):
+    """Custom formatter that includes stack trace for ERROR level and above"""
+
+    def format(self, record):
+        # Add stack trace for ERROR level and above
+        if record.levelno >= logging.ERROR:
+            if not record.exc_info:
+                # Get current stack trace if no exception info is available
+                import traceback
+                record.stack_info = ''.join(traceback.format_stack())
+        return super().format(record)
+
 def configure_logger(server_args, prefix: str = ""):
     if SGLANG_LOGGING_CONFIG_PATH := os.getenv("SGLANG_LOGGING_CONFIG_PATH"):
         if not os.path.exists(SGLANG_LOGGING_CONFIG_PATH):
@@ -902,15 +914,43 @@ def configure_logger(server_args, prefix: str = ""):
             custom_config = json.loads(file.read())
         logging.config.dictConfig(custom_config)
         return
-    format = f"[%(asctime)s{prefix}] %(message)s"
-    # format = f"[%(asctime)s.%(msecs)03d{prefix}] %(message)s"
-    logging.basicConfig(
-        level=getattr(logging, server_args.log_level.upper()),
-        format=format,
-        datefmt="%Y-%m-%d %H:%M:%S",
-        force=True,
-    )
+    format_str = f"[%(asctime)s{prefix}] %(message)s"
+    # # format = f"[%(asctime)s.%(msecs)03d{prefix}] %(message)s"
+    # logging.basicConfig(
+    #     level=getattr(logging, server_args.log_level.upper()),
+    #     format=format,
+    #     datefmt="%Y-%m-%d %H:%M:%S",
+    #     force=True,
+    # )
+        # format_str = f"[%(asctime)s.%(msecs)03d{prefix}] %(message)s"
 
+    # Create custom formatter with stack trace for errors
+    formatter = StackTraceFormatter(
+        fmt=format_str,
+        datefmt="%Y-%m-%d %H:%M:%S"
+    )
+        # Configure logging with custom formatter
+    logger = logging.getLogger()
+    logger.setLevel(getattr(logging, server_args.log_level.upper()))
+
+    # Remove existing handlers
+    for handler in logger.handlers[:]:
+        logger.removeHandler(handler)
+
+    # Add console handler with custom formatter
+    console_handler = logging.StreamHandler()
+    console_handler.setFormatter(formatter)
+    logger.addHandler(console_handler)
+
+    #     # Monkey patch the error method to include stack trace
+    # original_error = logging.getLogger().error
+    #
+    # def error_with_stack(msg, *args, **kwargs):
+    #     kwargs.setdefault('stack_info', True)
+    #     original_error(msg, *args, **kwargs)
+    #
+    # logging.getLogger(__name__).error = error_with_stack
+    #
 
 # source: https://github.com/vllm-project/vllm/blob/93b38bea5dd03e1b140ca997dfaadef86f8f1855/vllm/lora/utils.py#L9
 def replace_submodule(

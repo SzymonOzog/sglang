@@ -2020,7 +2020,7 @@ class Scheduler(
                         self.tree_cache,
                     )
                     req.waiting_status = WaitingStatus.LOADING
-                    self.tree_cache.mooncake_load_back(req, req.last_node_global)
+                    self.tree_cache.mooncake_load_back(req, req.last_host_node)
             time.sleep(0.001)
 
     def watchdog_thread(self):
