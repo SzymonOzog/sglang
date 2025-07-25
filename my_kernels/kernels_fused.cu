@@ -28,8 +28,8 @@ struct __align__(alignof(T) * sz) array_t {
 //   return val;
 // }
 
-constexpr double max_8_bit = 448.0;
-constexpr double min_8_bit = -448.0;
+constexpr float max_8_bit = 448.0;
+constexpr float min_8_bit = -448.0;
 
 template <typename scalar_t, bool FUSED_ADD>
 __global__ void rms_norm_quant_kernel(scalar_t* __restrict__  input, scalar_t* __restrict__  weight,
@@ -104,15 +104,10 @@ __global__ void rms_norm_quant_kernel(scalar_t* __restrict__  input, scalar_t* _
             interm.data[i] *= (float)w.data[i];
             local_absmax = fmaxf(local_absmax, fabsf(x.data[i]));
         }
-        // for (int mask = 8; mask>0; mask/=2)
-        // {
-        //     float recv = __shfl_xor_sync(0xffffffff, local_absmax, mask, 32);
-        //     local_absmax = fmaxf(local_absmax, recv);
         local_absmax = fmaxf(local_absmax, __shfl_xor_sync(0xffffffff, local_absmax, 8));
         local_absmax = fmaxf(local_absmax, __shfl_xor_sync(0xffffffff, local_absmax, 4));
         local_absmax = fmaxf(local_absmax, __shfl_xor_sync(0xffffffff, local_absmax, 2));
         local_absmax = fmaxf(local_absmax, __shfl_xor_sync(0xffffffff, local_absmax, 1));
-        // }
 
         float y_s = (local_absmax/max_8_bit);
         if (threadIdx.x%16 == 0)
