@@ -1223,7 +1223,7 @@ class DeepseekV2AttentionMLA(nn.Module):
                 q = self.q_a_layernorm(q)
                 k_nope = self.kv_a_layernorm(k_nope)
 
-            k_nope = (k_nope[0].unsqueeze(1), k_nope[1])
+            k_nope = k_nope.unsqueeze(1)
             q = self.q_b_proj(q)[0].view(-1, self.num_local_heads, self.qk_head_dim)
         else:
             q = self.q_proj(hidden_states)[0].view(
@@ -1825,9 +1825,9 @@ class DeepseekV2DecoderLayer(nn.Module):
                 tp_size=mlp_tp_size,
             )
 
-        self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps, output_quant=True)
         self.post_attention_layernorm = RMSNorm(
-            config.hidden_size, eps=config.rms_norm_eps
+            config.hidden_size, eps=config.rms_norm_eps, output_quant=True
         )
 
         self.layer_communicator = LayerCommunicator(
@@ -2011,7 +2011,7 @@ class DeepseekV2Model(nn.Module):
                 for layer_id in range(config.num_hidden_layers)
             ]
         )
-        self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps, output_quant=True)
 
     def get_input_embeddings(self) -> torch.Tensor:
         return self.embed_tokens

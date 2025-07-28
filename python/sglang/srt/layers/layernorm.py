@@ -68,10 +68,12 @@ class RMSNorm(CustomOp):
         self,
         hidden_size: int,
         eps: float = 1e-6,
+        output_quant=False,
     ) -> None:
         super().__init__()
         self.weight = nn.Parameter(torch.ones(hidden_size))
         self.variance_epsilon = eps
+        self.output_quant = output_quant
         if _use_aiter:
             self._forward_method = self.forward_aiter
 
@@ -80,19 +82,23 @@ class RMSNorm(CustomOp):
         x: torch.Tensor,
         residual: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
-        # if residual is not None:
-        #     fused_add_rmsnorm(x, residual, self.weight.data, self.variance_epsilon)
-        #     return x, residual
-        # out = rmsnorm(x, self.weight.data, self.variance_epsilon)
-        q = torch.empty(x.shape, dtype=torch.float8_e4m3fn, device=x.device)
-        s = torch.empty((*x.shape[:-1], x.shape[-1]//128), dtype=torch.float32, device=x.device)
-        if residual is not None:
-            # fused_add_rmsnorm(x, residual, self.weight.data, self.variance_epsilon)
-            cu_ext.rms_norm_quant_add(x, residual, q, s, self.weight.data, 1e-6)
-            return (q, s), residual
-        # rmsnorm(x, self.weight.data, self.variance_epsilon)
-        cu_ext.rms_norm_quant(x, q, s, self.weight.data, 1e-6)
-        return (q, s)
+        if self.output_quant:
+            logger.info("calling RMS norm")
+            q = torch.empty(x.shape, dtype=torch.float8_e4m3fn, device=x.device)
+            s = torch.empty((*x.shape[:-1], x.shape[-1]//128), dtype=torch.float32, device=x.device)
+            if residual is not None:
+                # fused_add_rmsnorm(x, residual, self.weight.data, self.variance_epsilon)
+                cu_ext.rms_norm_quant_add(x, residual, q, s, self.weight.data, 1e-6)
+                return (q, s), residual
+            # rmsnorm(x, self.weight.data, self.variance_epsilon)
+            cu_ext.rms_norm_quant(x, q, s, self.weight.data, 1e-6)
+            return (q, s)
+        else:
+            if residual is not None:
+                fused_add_rmsnorm(x, residual, self.weight.data, self.variance_epsilon)
+                return x, residual
+            out = rmsnorm(x, self.weight.data, self.variance_epsilon)
+            return out
 
     def forward_npu(
         self,
