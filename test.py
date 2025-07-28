@@ -30,11 +30,14 @@ for N in [8, 64, 256, 1024, 2048]:
 
     rms_n = RMSNorm(7168).to(torch.bfloat16)
     inp3 = rms_n.forward_cuda(inp1)
+
+    # print(isinstance(inp3, tuple))
+    # q1, s1 = inp3
     cu_ext.rms_norm(inp1, inp2, rms_n.weight, 1e-6)
 
 
-    # q1, s1 = per_token_group_quant_fp8(inp3, 128)
-    q1, s1 = sglang_per_token_group_quant_fp8(inp3, 128)
+    q1, s1 = per_token_group_quant_fp8(inp3, 128)
+    # q1, s1 = sglang_per_token_group_quant_fp8(inp3, 128)
     q2 = torch.empty_like(q1)
     s2 = torch.empty_like(s1)
 
@@ -43,15 +46,16 @@ for N in [8, 64, 256, 1024, 2048]:
 
 
     if "debug" in sys.argv:
+        print(torch.isclose(q1.to(torch.bfloat16), q2.to(torch.bfloat16)).logical_not().nonzero())
+        print(torch.allclose(s2, s2))
         # print(inp3[0])
-        print("")
-        print(q1)
-        print(q2)
-        # print(q3)
-        print("")
-        print(s1)
-        print(s2)
-
+        # print("")
+        print(q1.to(torch.bfloat16)[torch.isclose(q1.to(torch.bfloat16), q2.to(torch.bfloat16)).logical_not()])
+        print(q2.to(torch.bfloat16)[torch.isclose(q1.to(torch.bfloat16), q2.to(torch.bfloat16)).logical_not()])
+        # # print(q3)
+        # print("")
+        # print(s1)
+        # print(s2)
 for N in [8, 64, 256, 1024, 2048]:
     inp1 = torch.randn((N, H), dtype=torch.bfloat16)
     inp2 = torch.randn((N, H), dtype=torch.bfloat16)
@@ -63,8 +67,9 @@ for N in [8, 64, 256, 1024, 2048]:
     # cu_ext.rms_norm(inp1, inp2, rms_n.weight, 1e-6)
 
 
-    # q1, s1 = per_token_group_quant_fp8(inp3, 128)
-    q1, s1 = sglang_per_token_group_quant_fp8(out, 128)
+    q1, s1 = per_token_group_quant_fp8(out, 128)
+    # q1, s1 = sglang_per_token_group_quant_fp8(out, 128)
+    # q1, s1, = out
     q2 = torch.empty_like(q1)
     s2 = torch.empty_like(s1)
 
@@ -72,6 +77,14 @@ for N in [8, 64, 256, 1024, 2048]:
 # q2, s2 = per_token_group_quant_fp8(inp2, 128)
 
 
+    # if "debug" in sys.argv:
+    #     print(torch.isclose(q1.to(torch.bfloat16), q2.to(torch.bfloat16)).logical_not().nonzero())
+    #     print(torch.allclose(s2, s2))
+    #     print(torch.allclose(res, inp4))
+    #     # print(inp3[0])
+    #     # print("")
+    #     print(q1.to(torch.bfloat16)[torch.isclose(q1.to(torch.bfloat16), q2.to(torch.bfloat16)).logical_not()])
+    #     print(q2.to(torch.bfloat16)[torch.isclose(q1.to(torch.bfloat16), q2.to(torch.bfloat16)).logical_not()])
     if "debug" in sys.argv:
         # print(inp3[0])
         print("")

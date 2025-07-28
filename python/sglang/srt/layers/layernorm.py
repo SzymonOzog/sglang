@@ -83,15 +83,14 @@ class RMSNorm(CustomOp):
         residual: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         if self.output_quant:
-            logger.info("calling RMS norm")
             q = torch.empty(x.shape, dtype=torch.float8_e4m3fn, device=x.device)
             s = torch.empty((*x.shape[:-1], x.shape[-1]//128), dtype=torch.float32, device=x.device)
             if residual is not None:
                 # fused_add_rmsnorm(x, residual, self.weight.data, self.variance_epsilon)
-                cu_ext.rms_norm_quant_add(x, residual, q, s, self.weight.data, 1e-6)
+                cu_ext.rms_norm_quant_add(x, residual, q, s, self.weight, 1e-6)
                 return (q, s), residual
             # rmsnorm(x, self.weight.data, self.variance_epsilon)
-            cu_ext.rms_norm_quant(x, q, s, self.weight.data, 1e-6)
+            cu_ext.rms_norm_quant(x, q, s, self.weight, 1e-6)
             return (q, s)
         else:
             if residual is not None:

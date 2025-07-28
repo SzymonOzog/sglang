@@ -1197,12 +1197,10 @@ class DeepseekV2AttentionMLA(nn.Module):
 
         if self.q_lora_rank is not None:
             if hidden_states[0].shape[0] <= 16 and self.use_min_latency_fused_a_gemm:
-                logger.info("running A")
                 fused_qkv_a_proj_out = dsv3_fused_a_gemm(
                     hidden_states, self.fused_qkv_a_proj_with_mqa.weight.T
                 )
             else:
-                logger.info("running B")
                 fused_qkv_a_proj_out = self.fused_qkv_a_proj_with_mqa(hidden_states)[0]
             q, latent_cache = fused_qkv_a_proj_out.split(
                 [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim], dim=-1
@@ -1214,12 +1212,10 @@ class DeepseekV2AttentionMLA(nn.Module):
                 current_stream = torch.cuda.current_stream()
                 self.alt_stream.wait_stream(current_stream)
                 q = self.q_a_layernorm(q)
-                logger.info("running C")
                 with torch.cuda.stream(self.alt_stream):
                     k_nope = self.kv_a_layernorm(k_nope)
                 current_stream.wait_stream(self.alt_stream)
             else:
-                logger.info("running D")
                 q = self.q_a_layernorm(q)
                 k_nope = self.kv_a_layernorm(k_nope)
 
