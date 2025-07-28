@@ -71,6 +71,7 @@ class RMSNorm(CustomOp):
         output_quant=False,
     ) -> None:
         super().__init__()
+        # self.weight = nn.Parameter(torch.randn(hidden_size))
         self.weight = nn.Parameter(torch.ones(hidden_size))
         self.variance_epsilon = eps
         self.output_quant = output_quant
@@ -87,10 +88,10 @@ class RMSNorm(CustomOp):
             s = torch.empty((*x.shape[:-1], x.shape[-1]//128), dtype=torch.float32, device=x.device)
             if residual is not None:
                 # fused_add_rmsnorm(x, residual, self.weight.data, self.variance_epsilon)
-                cu_ext.rms_norm_quant_add(x, residual, q, s, self.weight, 1e-6)
+                cu_ext.rms_norm_quant_add(x, residual, q, s, self.weight.data, 1e-6)
                 return (q, s), residual
             # rmsnorm(x, self.weight.data, self.variance_epsilon)
-            cu_ext.rms_norm_quant(x, q, s, self.weight, 1e-6)
+            cu_ext.rms_norm_quant(x, q, s, self.weight.data, 1e-6)
             return (q, s)
         else:
             if residual is not None:
