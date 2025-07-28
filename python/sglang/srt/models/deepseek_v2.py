@@ -1825,7 +1825,7 @@ class DeepseekV2DecoderLayer(nn.Module):
                 tp_size=mlp_tp_size,
             )
 
-        self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps, output_quant=True)
+        self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(
             config.hidden_size, eps=config.rms_norm_eps
         )
