@@ -236,6 +236,7 @@ def deepgemm_w8a8_block_fp8_linear_with_fallback(
         q_input, x_scale = input
         output_shape = [*q_input.shape[:-1], weight.shape[0]]
     else:
+        output_shape = [*input.shape[:-1], weight.shape[0]]
         input_2d = input.view(-1, input.shape[-1])
         q_input, x_scale = sglang_per_token_group_quant_fp8(
             input_2d,
