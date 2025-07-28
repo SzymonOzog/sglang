@@ -1223,7 +1223,7 @@ class DeepseekV2AttentionMLA(nn.Module):
                 q = self.q_a_layernorm(q)
                 k_nope = self.kv_a_layernorm(k_nope)
 
-            k_nope = k_nope.unsqueeze(1)
+            k_nope = (k_nope[0].unsqueeze(1), k_nope[1])
             q = self.q_b_proj(q)[0].view(-1, self.num_local_heads, self.qk_head_dim)
         else:
             q = self.q_proj(hidden_states)[0].view(
