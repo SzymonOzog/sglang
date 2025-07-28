@@ -100,7 +100,7 @@ __global__ void rms_norm_quant_kernel(scalar_t* __restrict__  input, scalar_t* _
         for (int64_t i = 0; i<P::size; i++)
         {
             float q = (float)interm.data[i]/y_s;
-            float out_val = fminf(fmaxf(q, min_8_bit), max_8_bit);
+            q = fminf(fmaxf(q, min_8_bit), max_8_bit);
             out.data[i] = FP8_TYPE(q);
 
         }
@@ -192,7 +192,7 @@ __global__ void rms_norm_quant_add_kernel(scalar_t* __restrict__  input,
         for (int64_t i = 0; i<P::size; i++)
         {
             float q = (float)interm.data[i]/y_s;
-            float out_val = fminf(fmaxf(q, min_8_bit), max_8_bit);
+            q = fminf(fmaxf(q, min_8_bit), max_8_bit);
             out.data[i] = FP8_TYPE(q);
 
         }
