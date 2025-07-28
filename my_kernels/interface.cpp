@@ -21,9 +21,21 @@ void rms_norm_quant(torch::Tensor& input, torch::Tensor& output_q, torch::Tensor
 }
 
 
+void rms_norm_quant_add_launcher(torch::Tensor& input, torch::Tensor& residual,
+        torch::Tensor& output_q, torch::Tensor& output_s,
+        torch::Tensor& weight, double eps);
+
+void rms_norm_quant_add(torch::Tensor& input, torch::Tensor& residual,
+        torch::Tensor& output_q, torch::Tensor& output_s,
+        torch::Tensor& weight, double eps)
+{
+    rms_norm_quant_add_launcher(input, residual, output_q, output_s, weight, eps);
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
 {
   m.def("rms_norm", &rms_norm, "rms_norm");
   // m.def("quantize", &quantize, "quantize");
   m.def("rms_norm_quant", &rms_norm_quant, "rms_norm_quant");
+  m.def("rms_norm_quant_add", &rms_norm_quant_add, "rms_norm_quant_add");
 }
