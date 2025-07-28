@@ -2011,7 +2011,7 @@ class DeepseekV2Model(nn.Module):
                 for layer_id in range(config.num_hidden_layers)
             ]
         )
-        self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps, output_quant=True)
+        self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     def get_input_embeddings(self) -> torch.Tensor:
         return self.embed_tokens
