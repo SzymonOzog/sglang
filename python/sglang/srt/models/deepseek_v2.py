@@ -1077,11 +1077,18 @@ class DeepseekV2AttentionMLA(nn.Module):
         if self.attn_mha.kv_b_proj is None:
             self.attn_mha.kv_b_proj = self.kv_b_proj
 
-        if hidden_states.shape[0] == 0:
-            assert (
-                not self.o_proj.reduce_results
-            ), "short-circuiting allreduce will lead to hangs"
-            return hidden_states, None, forward_batch, None
+        if isinstance(hidden_states, Tuple):
+            if hidden_states[0].shape[0] == 0:
+                assert (
+                    not self.o_proj.reduce_results
+                ), "short-circuiting allreduce will lead to hangs"
+                return hidden_states, None, forward_batch, None
+        else:
+            if hidden_states.shape[0] == 0:
+                assert (
+                    not self.o_proj.reduce_results
+                ), "short-circuiting allreduce will lead to hangs"
+                return hidden_states, None, forward_batch, None
 
         attn_forward_method = self.dispatch_attn_forward_method(forward_batch)
 
