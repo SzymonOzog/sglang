@@ -93,7 +93,11 @@ __global__ void rms_norm_quant_kernel(scalar_t* __restrict__  input, scalar_t* _
         if (threadIdx.x%16 == 0)
         {
              // = y_s;
-            __stcg(&output_s[row*(d*P::size/128) + (idx * P::size) / 128], y_s);
+            // __stcg(&output_s[row*(d*P::size/128) + (idx * P::size) / 128], y_s);
+            // __stcg(&output_s[(d*P::size/128) + row*(idx * P::size) / 128], y_s);
+            int col = (idx * P::size) / 128;
+            int new_idx = col*(gridDim.x) + row;
+            __stcg(&output_s[new_idx], y_s);
         }
 
         O out;
@@ -185,7 +189,13 @@ __global__ void rms_norm_quant_add_kernel(scalar_t* __restrict__  input,
         float y_s = (local_absmax/max_8_bit);
         if (threadIdx.x%16 == 0)
         {
-            __stcg(&output_s[row*(d*P::size/128) + (idx * P::size) / 128], y_s);
+            // __stcg(&output_s[row*(d*P::size/128) + (idx * P::size) / 128], y_s);
+            int col = (idx * P::size) / 128;
+            int new_idx = col*(gridDim.x) + row;
+            __stcg(&output_s[new_idx], y_s);
+            // int old_idx = row*(d*P::size/128) + (idx * P::size) / 128;
+            // printf("col %d, row %d, block %d, 1 = %d\n", col, (int)row, old_idx, (int)new_idx);
+            // unsigned int r = row*(d*P::size/128);
         }
 
         O out;
