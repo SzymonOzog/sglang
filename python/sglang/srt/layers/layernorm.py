@@ -51,6 +51,13 @@ elif _is_hip:
     from vllm._custom_ops import fused_add_rms_norm, rms_norm
 
 logger = logging.getLogger(__name__)
+from torch.utils.cpp_extension import load
+
+cu_ext = load(name='my_ext', sources=["./my_kernels/interface.cpp",
+                                      "./my_kernels/kernels.cu",
+                                      "./my_kernels/kernels_fused.cu", ],
+              extra_include_paths=["/usr/local/lib/python3.10/dist-packages/flashinfer/data/include/"],
+              verbose=True, extra_cuda_cflags=[f"-lineinfo", "--use_fast_math", "-O3"])
 
 if is_npu():
     import torch_npu
@@ -73,11 +80,19 @@ class RMSNorm(CustomOp):
         x: torch.Tensor,
         residual: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        # if residual is not None:
+        #     fused_add_rmsnorm(x, residual, self.weight.data, self.variance_epsilon)
+        #     return x, residual
+        # out = rmsnorm(x, self.weight.data, self.variance_epsilon)
+        q = torch.empty(x.shape, dtype=torch.float8_e4m3fn, device=x.device)
+        s = torch.empty((*x.shape[:-1], x.shape[-1]/128), dtype=torch.float32, device=x.device)
         if residual is not None:
-            fused_add_rmsnorm(x, residual, self.weight.data, self.variance_epsilon)
-            return x, residual
-        out = rmsnorm(x, self.weight.data, self.variance_epsilon)
-        return out
+            # fused_add_rmsnorm(x, residual, self.weight.data, self.variance_epsilon)
+            cu_ext.rms_norm_quant_add(x, residual, q, s, self.weight.data, 1e-6)
+            return (q, s), residual
+        # rmsnorm(x, self.weight.data, self.variance_epsilon)
+        cu_ext.rms_norm_quant_add(x, q, s, self.weight.data, 1e-6)
+        return (q, s)
 
     def forward_npu(
         self,
