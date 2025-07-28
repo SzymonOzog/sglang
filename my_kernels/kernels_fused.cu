@@ -90,7 +90,6 @@ __global__ void rms_norm_quant_kernel(scalar_t* __restrict__  input, scalar_t* _
 
     __syncthreads();
     acc = reduction[0];
-    // const uint32_t elems_per_thread = P::size;
     using O = array_t<FP8_TYPE, 8 / sizeof(FP8_TYPE)>;
     for(int64_t idx = tx; idx<d; idx+=blockDim.x)
     {
@@ -102,7 +101,7 @@ __global__ void rms_norm_quant_kernel(scalar_t* __restrict__  input, scalar_t* _
         {
             interm.data[i] = (float)x.data[i] * acc;
             interm.data[i] *= (float)w.data[i];
-            local_absmax = fmaxf(local_absmax, fabsf(x.data[i]));
+            local_absmax = fmaxf(local_absmax, fabsf(interm.data[i]));
         }
         local_absmax = fmaxf(local_absmax, __shfl_xor_sync(0xffffffff, local_absmax, 8));
         local_absmax = fmaxf(local_absmax, __shfl_xor_sync(0xffffffff, local_absmax, 4));
