@@ -1196,7 +1196,7 @@ class DeepseekV2AttentionMLA(nn.Module):
         from sglang.srt.model_executor.cuda_graph_runner import get_is_capture_mode
 
         if self.q_lora_rank is not None:
-            if hidden_states.shape[0] <= 16 and self.use_min_latency_fused_a_gemm:
+            if hidden_states[0].shape[0] <= 16 and self.use_min_latency_fused_a_gemm:
                 fused_qkv_a_proj_out = dsv3_fused_a_gemm(
                     hidden_states, self.fused_qkv_a_proj_with_mqa.weight.T
                 )
