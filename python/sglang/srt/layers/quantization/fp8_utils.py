@@ -247,7 +247,9 @@ def deepgemm_w8a8_block_fp8_linear_with_fallback(
             scale_tma_aligned=True,
             scale_ue8m0=deep_gemm_wrapper.DEEPGEMM_SCALE_UE8M0,
         )
-        logger.info(f"q_input  = {q_input}, 2 = {q_input2} allclose inputs {torch.allclose(q_input.to(torch.bfloat16), q_input2.to(torch.bfloat16), atol=1, rtol = 1e-3)} scales {torch.allclose(x_scale, x_scale2)}")
+        close = torch.allclose(q_input.to(torch.bfloat16), q_input2.to(torch.bfloat16), atol=1, rtol = 1e-3)
+        idx = torch.isclose(q_input.to(torch.bfloat16), q_input2.to(torch.bfloat16), atol=1, rtol = 1e-3)
+        logger.info(f"q_input  = {q_input[idx.logical_not()]}, 2 = {q_input2[idx.logical_not()]} allclose inputs {close}, scales {torch.allclose(x_scale, x_scale2)} ")
     else:
         output_shape = [*input.shape[:-1], weight.shape[0]]
         input_2d = input.view(-1, input.shape[-1])
