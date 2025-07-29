@@ -1,6 +1,7 @@
 from typing import Callable, List, Optional, Tuple
 
 import torch
+import logging
 
 from sglang.srt.layers.quantization import deep_gemm_wrapper
 from sglang.srt.layers.quantization.fp8_kernel import sglang_per_token_group_quant_fp8
