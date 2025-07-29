@@ -91,6 +91,7 @@ class RMSNorm(CustomOp):
                 # fused_add_rmsnorm(x, residual, self.weight.data, self.variance_epsilon)
                 cu_ext.rms_norm_quant_add(x, residual, q, s, self.weight.data, self.variance_epsilon)
                 return (q, s), residual
+            logger.info(f"eps {self.variance_epsilon}")
             out = rmsnorm(x, self.weight.data, self.variance_epsilon)
             cu_ext.rms_norm_quant(x, q, s, self.weight.data, self.variance_epsilon)
             return (q, s, out, x)
