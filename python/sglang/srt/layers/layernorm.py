@@ -52,6 +52,7 @@ elif _is_hip:
 
 logger = logging.getLogger(__name__)
 from torch.utils.cpp_extension import load
+from sglang.srt.layers.quantization.fp8_kernel import per_token_group_quant_fp8, sglang_per_token_group_quant_fp8
 
 cu_ext = load(name='my_ext', sources=["./my_kernels/interface.cpp",
                                       "./my_kernels/kernels.cu",
@@ -90,9 +91,9 @@ class RMSNorm(CustomOp):
                 # fused_add_rmsnorm(x, residual, self.weight.data, self.variance_epsilon)
                 cu_ext.rms_norm_quant_add(x, residual, q, s, self.weight.data, 1e-6)
                 return (q, s), residual
-            # rmsnorm(x, self.weight.data, self.variance_epsilon)
+            out = rmsnorm(x, self.weight.data, self.variance_epsilon)
             cu_ext.rms_norm_quant(x, q, s, self.weight.data, 1e-6)
-            return (q, s)
+            return (q, s, out)
         else:
             if residual is not None:
                 fused_add_rmsnorm(x, residual, self.weight.data, self.variance_epsilon)

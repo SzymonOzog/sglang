@@ -50,6 +50,7 @@ if _is_cuda:
     from sgl_kernel import fp8_blockwise_scaled_mm, fp8_scaled_mm
 
 use_vllm_cutlass_w8a8_fp8_kernel = get_bool_env_var("USE_VLLM_CUTLASS_W8A8_FP8_KERNEL")
+logger = logging.getLogger(__name__)
 
 # Input scaling factors are no longer optional in _scaled_mm starting
 # from pytorch 2.5. Allocating a dummy tensor to pass as input_scale
@@ -233,8 +234,19 @@ def deepgemm_w8a8_block_fp8_linear_with_fallback(
         )
 
     if isinstance(input, tuple):
-        q_input, x_scale = input
+        q_input, x_scale, out = input
         output_shape = [*q_input.shape[:-1], weight.shape[0]]
+
+        output_shape2 = [*out.shape[:-1], weight.shape[0]]
+        input_2d = out.view(-1, out.shape[-1])
+        q_input2, x_scale2 = sglang_per_token_group_quant_fp8(
+            input_2d,
+            block_size[1],
+            column_major_scales=True,
+            scale_tma_aligned=True,
+            scale_ue8m0=deep_gemm_wrapper.DEEPGEMM_SCALE_UE8M0,
+        )
+        logger.info(f"q_input  = {q_input}, 2 = {q_input2}")
     else:
         output_shape = [*input.shape[:-1], weight.shape[0]]
         input_2d = input.view(-1, input.shape[-1])
