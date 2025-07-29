@@ -72,8 +72,8 @@ class RMSNorm(CustomOp):
         output_quant=False,
     ) -> None:
         super().__init__()
-        # self.weight = nn.Parameter(torch.randn(hidden_size))
-        self.weight = nn.Parameter(torch.ones(hidden_size))
+        self.weight = nn.Parameter(torch.randn(hidden_size))
+        # self.weight = nn.Parameter(torch.ones(hidden_size))
         self.variance_epsilon = eps
         self.output_quant = output_quant
         if _use_aiter:
@@ -93,7 +93,7 @@ class RMSNorm(CustomOp):
                 return (q, s), residual
             logger.info(f"eps {self.variance_epsilon}, x = {x}")
             out = rmsnorm(x, self.weight.data, self.variance_epsilon)
-            logger.info(f"eps2 {self.variance_epsilon}, x = {x}")
+            logger.info(f"eps2 {self.variance_epsilon}, x = {x}, weight={self.weight.dtype}")
             cu_ext.rms_norm_quant(x, q, s, self.weight.data, self.variance_epsilon)
             logger.info(f"eps3 {self.variance_epsilon}, x = {x}")
             return (q, s, out, x)
