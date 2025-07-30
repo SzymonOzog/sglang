@@ -260,10 +260,10 @@ def deepgemm_w8a8_block_fp8_linear_with_fallback(
         idx3 = torch.isclose(out2, out3, atol=1, rtol=1)
         idx2 = torch.isclose(x_scale, x_scale2)
         # logger.info(f"out = {out}, dequant={out2}, dequant2={out3}, q_input ={q_input[idx.logical_not()]}, 2 = {q_input2[idx.logical_not()]} allclose inputs {close}, scales {torch.allclose(x_scale, x_scale2)} x_scale ={x_scale[idx2.logical_not()]}, 2 = {x_scale2[idx2.logical_not()]}")
-        q_input, x_scale = q_input2, x_scale2
         if not close and "0" in str(q_input.device):
-            logger.info(f"out = {out[idx3.logical_not()]}, dequant={out2[idx3.logical_not()]}, dequant2={out3[idx3.logical_not()]},full {out2} full3 {out3} s{x_scale} s2 {x_scale2} ")
+            logger.info(f"out = {out[idx3.logical_not()]}, dequant={out2[idx3.logical_not()]}, dequant2={out3[idx3.logical_not()]},full {out2} full3 {out3} s{x_scale} s2 {x_scale2}")
             torch.save([inx, rms.state_dict()], "failed.pt")
+        q_input, x_scale = q_input2, x_scale2
     else:
         output_shape = [*input.shape[:-1], weight.shape[0]]
         input_2d = input.view(-1, input.shape[-1])
