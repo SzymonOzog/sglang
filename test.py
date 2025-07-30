@@ -23,7 +23,48 @@ cu_ext = load(name='my_ext', sources=["./my_kernels/interface.cpp",
 # from msamp.common.dtype import Dtypes
 
 H = 7168
+failed = torch.load("failed.pt")
+t = failed[0].to("cuda:0")
+state = failed[1]
+state["weight"].to("cuda:0")
+print(t)
+print(state["weight"].to("cuda:0"))
+rms_n = RMSNorm(t.shape[-1]).to(torch.bfloat16)
+rms_n.load_state_dict(state)
+inp3 = rms_n.forward_cuda(t)
+# q1, s1 = per_token_group_quant_fp8(inp3, 128, column_major_scales=True, scale_tma_aligned=True)
+q1, s1 = sglang_per_token_group_quant_fp8(inp3.view(-1, inp3.shape[-1]), 128, column_major_scales=True, scale_tma_aligned=True)
+q2 = torch.empty_like(q1)
+s2 = torch.zeros_like(s1)
 
+acc = torch.sum(t * t, dim=1)/t.shape[1]
+srt = torch.rsqrt(acc+1e-6)
+# print("acc", acc)
+# print("rsqrt", srt)
+cu_ext.rms_norm_quant(t, q2, s2, rms_n.weight, 1e-6)
+# print(rms_n.weight.dtype)
+# print(q1)
+# print(q2)
+
+print(s1)
+print(s2)
+# print(torch.max(inp3))
+# print(torch.max(t))
+# print(t.shape)
+
+# print(q1.to(torch.bfloat16)[torch.isclose(q1.to(torch.bfloat16), q2.to(torch.bfloat16)).logical_not()][:10])
+# print(q2.to(torch.bfloat16)[torch.isclose(q1.to(torch.bfloat16), q2.to(torch.bfloat16)).logical_not()][:10])
+dq = s1.repeat_interleave(128).reshape((q1.shape))
+out2 = (q1.to(torch.bfloat16)*dq).to(torch.bfloat16)
+
+dq = s2.repeat_interleave(128).reshape((q1.shape))
+out3 = (q2.to(torch.bfloat16)*dq).to(torch.bfloat16)
+print(out2[:10])
+print(out3[:10])
+print(t[:10])
+print(inp3[:10])
+
+exit()
 for N in [8, 64, 256, 1024, 2048]:
     inp1 = torch.randn((N, H), dtype=torch.bfloat16)
     inp2 = torch.randn((N, H), dtype=torch.bfloat16)
@@ -36,7 +77,7 @@ for N in [8, 64, 256, 1024, 2048]:
     cu_ext.rms_norm(inp1, inp2, rms_n.weight, 1e-6)
 
 
-    q1, s1 = per_token_group_quant_fp8(inp3, 128)
+    q1, s1 = per_token_group_quant_fp8(inp3, 128, column_major_scales=True, scale_tma_aligned=True)
     # q1, s1 = sglang_per_token_group_quant_fp8(inp3, 128)
     q2 = torch.empty_like(q1)
     s2 = torch.empty_like(s1)
@@ -67,11 +108,12 @@ for N in [8, 64, 256, 1024, 2048]:
     # cu_ext.rms_norm(inp1, inp2, rms_n.weight, 1e-6)
 
 
-    q1, s1 = per_token_group_quant_fp8(out, 128)
+    q1, s1 = per_token_group_quant_fp8(out, 128, column_major_scales=True, scale_tma_aligned=True)
     # q1, s1 = sglang_per_token_group_quant_fp8(out, 128)
     # q1, s1, = out
     q2 = torch.empty_like(q1)
     s2 = torch.empty_like(s1)
+    print(s2.shape)
 
     cu_ext.rms_norm_quant_add(inp3, inp4, q2, s2, rms_n.weight, 1e-10)
 # q2, s2 = per_token_group_quant_fp8(inp2, 128)
