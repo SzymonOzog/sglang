@@ -301,7 +301,6 @@ def sglang_per_token_group_quant_fp8(
             # TODO extract "align" function
             # aligned to 4 * sizeof(float)
             aligned_size = (x.shape[-2] + 3) // 4 * 4
-            print("running aligned", aligned_size, x.shape)
             x_s = torch.empty(
                 x.shape[:-2] + (x.shape[-1] // group_size, aligned_size),
                 device=x.device,
