@@ -235,34 +235,35 @@ def deepgemm_w8a8_block_fp8_linear_with_fallback(
         )
 
     if isinstance(input, tuple):
-        q_input, x_scale, out, inx, rms = input
-        dq = x_scale.repeat_interleave(128).reshape((q_input.shape))
-        out2 = (q_input.to(torch.bfloat16)*dq).to(torch.bfloat16)
-        output_shape = [*q_input.shape[:-1], weight.shape[0]]
-
-        output_shape2 = [*out.shape[:-1], weight.shape[0]]
-        input_2d = out.view(-1, out.shape[-1])
-        q_input2, x_scale2 = sglang_per_token_group_quant_fp8(
-            input_2d,
-            block_size[1],
-            column_major_scales=True,
-            scale_tma_aligned=True,
-            scale_ue8m0=deep_gemm_wrapper.DEEPGEMM_SCALE_UE8M0,
-        )
-        out2 = (q_input.to(torch.bfloat16)*dq).to(torch.bfloat16)
-
-        dq = x_scale2.repeat_interleave(128).reshape((q_input.shape))
-        out3 = (q_input2.to(torch.bfloat16)*dq).to(torch.bfloat16)
-
-        close = torch.allclose(q_input.to(torch.bfloat16), q_input2.to(torch.bfloat16), atol=1, rtol = 1e-3)
-        idx = torch.isclose(q_input.to(torch.bfloat16), q_input2.to(torch.bfloat16), atol=1, rtol = 1e-3)
-        close = torch.allclose(out2, out3, atol=1, rtol=1)
-        idx3 = torch.isclose(out2, out3, atol=1, rtol=1)
-        idx2 = torch.isclose(x_scale, x_scale2)
-        # logger.info(f"out = {out}, dequant={out2}, dequant2={out3}, q_input ={q_input[idx.logical_not()]}, 2 = {q_input2[idx.logical_not()]} allclose inputs {close}, scales {torch.allclose(x_scale, x_scale2)} x_scale ={x_scale[idx2.logical_not()]}, 2 = {x_scale2[idx2.logical_not()]}")
-        if not close and "0" in str(q_input.device):
-            logger.info(f"out = {out[idx3.logical_not()]}, dequant={out2[idx3.logical_not()]}, dequant2={out3[idx3.logical_not()]},full {out2} full3 {out3} s{x_scale} s2 {x_scale2}")
-            torch.save([inx, rms.state_dict()], "failed.pt")
+        q_input, x_scale = input
+        # q_input, x_scale, out, inx, rms = input
+        # dq = x_scale.repeat_interleave(128).reshape((q_input.shape))
+        # out2 = (q_input.to(torch.bfloat16)*dq).to(torch.bfloat16)
+        # output_shape = [*q_input.shape[:-1], weight.shape[0]]
+        #
+        # output_shape2 = [*out.shape[:-1], weight.shape[0]]
+        # input_2d = out.view(-1, out.shape[-1])
+        # q_input2, x_scale2 = sglang_per_token_group_quant_fp8(
+        #     input_2d,
+        #     block_size[1],
+        #     column_major_scales=True,
+        #     scale_tma_aligned=True,
+        #     scale_ue8m0=deep_gemm_wrapper.DEEPGEMM_SCALE_UE8M0,
+        # )
+        # out2 = (q_input.to(torch.bfloat16)*dq).to(torch.bfloat16)
+        #
+        # dq = x_scale2.repeat_interleave(128).reshape((q_input.shape))
+        # out3 = (q_input2.to(torch.bfloat16)*dq).to(torch.bfloat16)
+        #
+        # close = torch.allclose(q_input.to(torch.bfloat16), q_input2.to(torch.bfloat16), atol=1, rtol = 1e-3)
+        # idx = torch.isclose(q_input.to(torch.bfloat16), q_input2.to(torch.bfloat16), atol=1, rtol = 1e-3)
+        # close = torch.allclose(out2, out3, atol=1, rtol=1)
+        # idx3 = torch.isclose(out2, out3, atol=1, rtol=1)
+        # idx2 = torch.isclose(x_scale, x_scale2)
+        # # logger.info(f"out = {out}, dequant={out2}, dequant2={out3}, q_input ={q_input[idx.logical_not()]}, 2 = {q_input2[idx.logical_not()]} allclose inputs {close}, scales {torch.allclose(x_scale, x_scale2)} x_scale ={x_scale[idx2.logical_not()]}, 2 = {x_scale2[idx2.logical_not()]}")
+        # if not close and "0" in str(q_input.device):
+        #     logger.info(f"out = {out[idx3.logical_not()]}, dequant={out2[idx3.logical_not()]}, dequant2={out3[idx3.logical_not()]},full {out2} full3 {out3} s{x_scale} s2 {x_scale2}")
+        #     torch.save([inx, rms.state_dict()], "failed.pt")
         # q_input, x_scale = q_input2, x_scale2
     else:
         output_shape = [*input.shape[:-1], weight.shape[0]]
