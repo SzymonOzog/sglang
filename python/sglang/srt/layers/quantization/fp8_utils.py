@@ -261,7 +261,7 @@ def deepgemm_w8a8_block_fp8_linear_with_fallback(
         idx2 = torch.isclose(x_scale, x_scale2)
         # logger.info(f"out = {out}, dequant={out2}, dequant2={out3}, q_input ={q_input[idx.logical_not()]}, 2 = {q_input2[idx.logical_not()]} allclose inputs {close}, scales {torch.allclose(x_scale, x_scale2)} x_scale ={x_scale[idx2.logical_not()]}, 2 = {x_scale2[idx2.logical_not()]}")
         q_input, x_scale = q_input2, x_scale2
-        if not close:
+        if not close and "0" in str(q_input.device):
             logger.info(f"out = {out[idx3.logical_not()]}, dequant={out2[idx3.logical_not()]}, dequant2={out3[idx3.logical_not()]}")
             torch.save([inx, rms.state_dict()], "failed.pt")
     else:
