@@ -25,7 +25,7 @@ template <typename scalar_t>
 __global__ void rms_norm_quant_kernel(scalar_t* __restrict__  input, scalar_t* __restrict__  weight,
         FP8_TYPE* __restrict__  output_q, float* __restrict__ output_s,
         const unsigned int d, const unsigned int rows, const float eps,
-        const unsigned int stride, const unsigned int s_rows, const unsigned int s_stride)
+        const unsigned int stride, const unsigned int s_stride)
 {
     int64_t row = blockIdx.x;
     int64_t tx = threadIdx.x;
@@ -106,7 +106,6 @@ __global__ void rms_norm_quant_kernel(scalar_t* __restrict__  input, scalar_t* _
             out.data[i] = FP8_TYPE(q);
 
         }
-        // reinterpret_cast<P*>(input + row*stride)[idx] = interm;
         __stcg(&reinterpret_cast<int2*>(output_q)[row * d + idx],
                 *reinterpret_cast<int2*>(&out));
     }
@@ -117,7 +116,8 @@ template <typename scalar_t>
 __global__ void rms_norm_quant_add_kernel(scalar_t* __restrict__  input,
         scalar_t* __restrict__  weight, scalar_t* __restrict__  residual,
         FP8_TYPE* __restrict__  output_q, float* __restrict__ output_s,
-        const unsigned int d, const unsigned int rows, const float eps)
+        const unsigned int d, const unsigned int rows, const float eps,
+        const unsigned int stride, const unsigned int r_stride, const unsigned int s_stride)
 {
     int64_t row = blockIdx.x;
     int64_t tx = threadIdx.x;
@@ -127,15 +127,15 @@ __global__ void rms_norm_quant_add_kernel(scalar_t* __restrict__  input,
     __shared__ float reduction[RMS_BLOCK_SIZE/32];
     for(int64_t idx = tx; idx<d; idx+=blockDim.x)
     {
-        P x = reinterpret_cast<P*>(input)[row * d + idx];
-        P a = reinterpret_cast<P*>(residual)[row * d + idx];
+        P x = reinterpret_cast<P*>(input + row*stride)[idx];
+        P a = reinterpret_cast<P*>(residual + row*r_stride)[idx];
 
         for (int64_t i = 0; i<P::size; i++)
         {
             x.data[i] += a.data[i];
             acc += (float)x.data[i] * (float)x.data[i];
         }
-        reinterpret_cast<P*>(residual)[row * d + idx] = x;
+        reinterpret_cast<P*>(residual + row*r_stride)[idx] = x;
 
     }
     for (int mask = 16; mask>0; mask/=2)
@@ -171,14 +171,14 @@ __global__ void rms_norm_quant_add_kernel(scalar_t* __restrict__  input,
     for(int64_t idx = tx; idx<d; idx+=blockDim.x)
     {
         float local_absmax = eps;
-        P x = reinterpret_cast<P*>(residual)[row * d + idx];
+        P x = reinterpret_cast<P*>(residual + row*r_stride)[idx];
         P w = reinterpret_cast<P*>(weight)[idx];
         P interm;
         for (int64_t i = 0; i<P::size; i++)
         {
-            interm.data[i] = (float)x.data[i] * acc;
-            interm.data[i] *= (float)w.data[i];
-            local_absmax = fmaxf(local_absmax, fabsf(interm.data[i]));
+            float val = (float)x.data[i] * acc * (float)w.data[i];
+            local_absmax = fmaxf(local_absmax, fabsf(val));
+            interm.data[i] = val;
         }
         local_absmax = fmaxf(local_absmax, __shfl_xor_sync(0xffffffff, local_absmax, 8));
         local_absmax = fmaxf(local_absmax, __shfl_xor_sync(0xffffffff, local_absmax, 4));
@@ -188,13 +188,9 @@ __global__ void rms_norm_quant_add_kernel(scalar_t* __restrict__  input,
         float y_s = (local_absmax/max_8_bit);
         if (threadIdx.x%16 == 0)
         {
-            // __stcg(&output_s[row*(d*P::size/128) + (idx * P::size) / 128], y_s);
             int col = (idx * P::size) / 128;
-            int new_idx = col*(gridDim.x) + row;
-            __stcg(&output_s[new_idx], y_s);
-            // int old_idx = row*(d*P::size/128) + (idx * P::size) / 128;
-            // printf("col %d, row %d, block %d, 1 = %d\n", col, (int)row, old_idx, (int)new_idx);
-            // unsigned int r = row*(d*P::size/128);
+            const int off = (col)*s_stride + row;
+            __stcg(&output_s[off], y_s);
         }
 
         O out;
@@ -219,7 +215,6 @@ void rms_norm_quant_launcher(torch::Tensor& input, torch::Tensor& output_q, torc
     const unsigned int rows = input.size(-2);
     const unsigned int stride = input.stride(-2);
 
-    const unsigned int s_rows = output_s.size(1);
     const unsigned int s_stride = output_s.stride(1);
 
     AT_DISPATCH_FLOATING_TYPES_AND2(at::ScalarType::Half, at::ScalarType::BFloat16,
@@ -237,8 +232,7 @@ void rms_norm_quant_launcher(torch::Tensor& input, torch::Tensor& output_q, torc
                 (input.data_ptr<scalar_t>(), weight.data_ptr<scalar_t>(),
                  static_cast<FP8_TYPE*>(output_q.data_ptr()),
                  output_s.data_ptr<float>(),
-                 packed_d, rows, eps, stride,
-                 s_rows, s_stride);
+                 packed_d, rows, eps, stride, s_stride);
                 }));
 }
 
@@ -249,6 +243,10 @@ void rms_norm_quant_add_launcher(torch::Tensor& input, torch::Tensor& residual,
 {
     const unsigned int d = input.size(-1);
     const unsigned int rows = input.size(-2);
+    const unsigned int stride = input.stride(-2);
+    const unsigned int r_stride = residual.stride(-2);
+
+    const unsigned int s_stride = output_s.stride(1);
 
     AT_DISPATCH_FLOATING_TYPES_AND2(at::ScalarType::Half, at::ScalarType::BFloat16,
                 input.scalar_type(), "rms_norm_quant_add", ([&] {
@@ -267,7 +265,7 @@ void rms_norm_quant_add_launcher(torch::Tensor& input, torch::Tensor& residual,
                  residual.data_ptr<scalar_t>(),
                  static_cast<FP8_TYPE*>(output_q.data_ptr()),
                  output_s.data_ptr<float>(),
-                 packed_d, rows, eps);
+                 packed_d, rows, eps, stride, r_stride, s_stride);
                 }));
 }
 
