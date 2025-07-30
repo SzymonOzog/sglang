@@ -239,7 +239,7 @@ def deepgemm_w8a8_block_fp8_linear_with_fallback(
         # q_input, x_scale, out, inx, rms = input
         # dq = x_scale.repeat_interleave(128).reshape((q_input.shape))
         # out2 = (q_input.to(torch.bfloat16)*dq).to(torch.bfloat16)
-        # output_shape = [*q_input.shape[:-1], weight.shape[0]]
+        output_shape = [*q_input.shape[:-1], weight.shape[0]]
         #
         # output_shape2 = [*out.shape[:-1], weight.shape[0]]
         # input_2d = out.view(-1, out.shape[-1])
