@@ -93,7 +93,7 @@ class RMSNorm(CustomOp):
                 return (q, s), residual
             out = rmsnorm(x, self.weight.data, self.variance_epsilon)
             cu_ext.rms_norm_quant(x, q, s, self.weight.data, self.variance_epsilon)
-            return (q, s, out, x)
+            return (q, s, out, x, self)
         else:
             if residual is not None:
                 fused_add_rmsnorm(x, residual, self.weight.data, self.variance_epsilon)
