@@ -25,7 +25,7 @@ template <typename scalar_t>
 __global__ void rms_norm_quant_kernel(scalar_t* __restrict__  input, scalar_t* __restrict__  weight,
         FP8_TYPE* __restrict__  output_q, float* __restrict__ output_s,
         const unsigned int d, const unsigned int rows, const float eps,
-        const unsigned int stride)
+        const unsigned int stride, const unsigned int s_rows, const unsigned int s_stride)
 {
     int64_t row = blockIdx.x;
     int64_t tx = threadIdx.x;
@@ -93,12 +93,9 @@ __global__ void rms_norm_quant_kernel(scalar_t* __restrict__  input, scalar_t* _
         float y_s = (local_absmax/max_8_bit);
         if (threadIdx.x%16 == 0)
         {
-             // = y_s;
-            // __stcg(&output_s[row*(d*P::size/128) + (idx * P::size) / 128], y_s);
-            // __stcg(&output_s[(d*P::size/128) + row*(idx * P::size) / 128], y_s);
             int col = (idx * P::size) / 128;
-            int new_idx = col*(gridDim.x) + row;
-            __stcg(&output_s[new_idx], y_s);
+            const int off = (col)*s_stride + row;
+            __stcg(&output_s[off], y_s);
         }
 
         O out;
@@ -222,6 +219,9 @@ void rms_norm_quant_launcher(torch::Tensor& input, torch::Tensor& output_q, torc
     const unsigned int rows = input.size(-2);
     const unsigned int stride = input.stride(-2);
 
+    const unsigned int s_rows = output_s.size(1);
+    const unsigned int s_stride = output_s.stride(1);
+
     AT_DISPATCH_FLOATING_TYPES_AND2(at::ScalarType::Half, at::ScalarType::BFloat16,
                 input.scalar_type(), "rms_norm_quant_add", ([&] {
 
@@ -237,7 +237,8 @@ void rms_norm_quant_launcher(torch::Tensor& input, torch::Tensor& output_q, torc
                 (input.data_ptr<scalar_t>(), weight.data_ptr<scalar_t>(),
                  static_cast<FP8_TYPE*>(output_q.data_ptr()),
                  output_s.data_ptr<float>(),
-                 packed_d, rows, eps, stride);
+                 packed_d, rows, eps, stride,
+                 s_rows, s_stride);
                 }));
 }
 
