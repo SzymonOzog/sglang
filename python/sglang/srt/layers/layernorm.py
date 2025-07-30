@@ -86,7 +86,13 @@ class RMSNorm(CustomOp):
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         if self.output_quant:
             q = torch.empty(x.shape, dtype=torch.float8_e4m3fn, device=x.device)
-            s = torch.empty((*x.shape[:-1], x.shape[-1]//128), dtype=torch.float32, device=x.device)
+            # s = torch.empty((*x.shape[:-1], x.shape[-1]//128), dtype=torch.float32, device=x.device)
+            aligned_size = (x.shape[-2] + 3) // 4 * 4
+            s = torch.empty(
+                x.shape[:-2] + (x.shape[-1] // 128, aligned_size),
+                device=x.device,
+                dtype=torch.float32,
+            ).permute(-1, -2)[: x.shape[-2], :]
             if residual is not None:
                 # fused_add_rmsnorm(x, residual, self.weight.data, self.variance_epsilon)
                 cu_ext.rms_norm_quant_add(x, residual, q, s, self.weight.data, self.variance_epsilon)
