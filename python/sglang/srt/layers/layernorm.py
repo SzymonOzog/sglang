@@ -62,7 +62,8 @@ torch.utils.cpp_extension.COMMON_NVCC_FLAGS = [
     '--expt-relaxed-constexpr'
 ]
 
-KERNEL_BASE = "/sgl-workspace/sglang"
+import os
+KERNEL_BASE = os.path.abspath.(__file__) + "../../../.."
 cu_ext = load(name='my_ext', sources=[f"{KERNEL_BASE}/my_kernels/interface.cpp",
                                       f"{KERNEL_BASE}/my_kernels/kernels.cu",
                                       f"{KERNEL_BASE}/my_kernels/kernels_fused.cu", ],
