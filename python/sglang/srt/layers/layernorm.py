@@ -63,7 +63,7 @@ torch.utils.cpp_extension.COMMON_NVCC_FLAGS = [
 ]
 
 import os
-KERNEL_BASE = os.path.abspath.(__file__) + "../../../.."
+KERNEL_BASE = os.path.abspath(__file__) + "../../../.."
 cu_ext = load(name='my_ext', sources=[f"{KERNEL_BASE}/my_kernels/interface.cpp",
                                       f"{KERNEL_BASE}/my_kernels/kernels.cu",
                                       f"{KERNEL_BASE}/my_kernels/kernels_fused.cu", ],
