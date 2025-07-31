@@ -53,6 +53,14 @@ elif _is_hip:
 logger = logging.getLogger(__name__)
 from torch.utils.cpp_extension import load
 from sglang.srt.layers.quantization.fp8_kernel import per_token_group_quant_fp8, sglang_per_token_group_quant_fp8
+# NOBODY LIKES MANUALLY CASTING!
+torch.utils.cpp_extension.COMMON_NVCC_FLAGS = [
+    # '-D__CUDA_NO_HALF_OPERATORS__',
+    # '-D__CUDA_NO_HALF_CONVERSIONS__',
+    # '-D__CUDA_NO_BFLOAT16_CONVERSIONS__',
+    # '-D__CUDA_NO_HALF2_OPERATORS__',
+    '--expt-relaxed-constexpr'
+]
 
 KERNEL_BASE = "/sgl-workspace/sglang"
 cu_ext = load(name='my_ext', sources=[f"{KERNEL_BASE}/my_kernels/interface.cpp",
