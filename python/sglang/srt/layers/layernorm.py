@@ -62,8 +62,8 @@ torch.utils.cpp_extension.COMMON_NVCC_FLAGS = [
     '--expt-relaxed-constexpr'
 ]
 
-import os
-KERNEL_BASE = os.path.abspath(__file__) + "../../../.."
+import pathlib
+KERNEL_BASE = pathlib.Path(__file__).parent.resolve() / "../../../.."
 cu_ext = load(name='my_ext', sources=[f"{KERNEL_BASE}/my_kernels/interface.cpp",
                                       f"{KERNEL_BASE}/my_kernels/kernels.cu",
                                       f"{KERNEL_BASE}/my_kernels/kernels_fused.cu", ],
