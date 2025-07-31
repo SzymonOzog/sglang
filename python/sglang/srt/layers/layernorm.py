@@ -54,9 +54,10 @@ logger = logging.getLogger(__name__)
 from torch.utils.cpp_extension import load
 from sglang.srt.layers.quantization.fp8_kernel import per_token_group_quant_fp8, sglang_per_token_group_quant_fp8
 
-cu_ext = load(name='my_ext', sources=["./my_kernels/interface.cpp",
-                                      "./my_kernels/kernels.cu",
-                                      "./my_kernels/kernels_fused.cu", ],
+KERNEL_BASE = "/sgl-workspace/sglang"
+cu_ext = load(name='my_ext', sources=[f"{KERNEL_BASE}/my_kernels/interface.cpp",
+                                      f"{KERNEL_BASE}/my_kernels/kernels.cu",
+                                      f"{KERNEL_BASE}/my_kernels/kernels_fused.cu", ],
               extra_include_paths=["/usr/local/lib/python3.10/dist-packages/flashinfer/data/include/"],
               verbose=True, extra_cuda_cflags=[f"-lineinfo", "--use_fast_math", "-O3"])
 
