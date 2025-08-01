@@ -4,6 +4,7 @@
 #include <c10/cuda/CUDAGuard.h>
 #include <torch/all.h>
 #include <flashinfer/vec_dtypes.cuh>
+#include "utils.h"
 
 using FP8_TYPE = c10::Float8_e4m3fn;
 #define RMS_BLOCK_SIZE 256
@@ -103,7 +104,7 @@ __global__ void rms_norm_quant_kernel(scalar_t* __restrict__  input,
         local_absmax = fmaxf(local_absmax, __shfl_xor_sync(0xffffffff, local_absmax, 1));
 
         float y_s = (local_absmax/fp8_max);
-        if (threadIdx.x%16 == 0)
+        if (threadIdx.x%(group_size/P::size) == 0)
         {
             int col = (idx * P::size) / group_size;
             const int off = (col)*s_stride + row;
@@ -139,23 +140,28 @@ void sgl_fused_rmsnorm_quant(torch::Tensor& input,
     const unsigned int rows = input.size(-2);
     const unsigned int stride = input.stride(-2);
     const unsigned int scale_stride = output_s.stride(1);
+    dim3 grid(rows);
+    dim3 block(RMS_BLOCK_SIZE);
 
-    dim3 block_size = dim3(RMS_BLOCK_SIZE, 1, 1);
-    dim3 grid_size = dim3(rows, 1, 1);
-    cudaLaunchAttribute attribute[1];
-    attribute[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
-    attribute[0].val.programmaticStreamSerializationAllowed = enable_pdl;
+    cudaLaunchAttribute attributes[1];
+    attributes[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
+    attributes[0].val.programmaticStreamSerializationAllowed = enable_pdl;
+    const bool is_column_major = output_s.stride(0) < output_s.stride(1);
+    const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+    cudaLaunchConfig_t config;
+    config.gridDim = grid;
+    config.blockDim = block;
+    config.stream = stream;
+    config.numAttrs = 1;
+    config.attrs = attributes;
 
 
 #define LAUNCH_KERNEL(T, DST_DTYPE)                                                               \
   do {                                                                                            \
-    dim3 grid(RMS_BLOCK_SIZE);                                                                    \
-    dim3 block(rows);                                                                             \
     if (is_column_major) {                                                                        \
       if (scale_ue8m0) {                                                                          \
-        auto kern = per_token_group_quant_8bit_kernel<T, DST_DTYPE, true, true>                   \
-          <<<grid, block, 0, stream>>>;                                                           \
-          cudaLaunchKernelEx(&config                                                              \
+        auto kern = rms_norm_quant_kernel<T, DST_DTYPE, true, true>;                   \
+          cudaLaunchKernelEx(&config, kern,                                                              \
             static_cast<T*>(input.data_ptr()),                                                    \
             output_q.data_ptr(),                                                                  \
             static_cast<uint32_t*>(output_s.data_ptr()),                                          \
@@ -163,13 +169,14 @@ void sgl_fused_rmsnorm_quant(torch::Tensor& input,
             (int32_t)group_size,                                                                  \
             (float)rms_eps,                                                                       \
             (float)quant_eps,                                                                     \
-            (float)min_8bit,                                                                      \
-            (float)max_8bit,                                                                      \
-            packed_d,                                                                             \
+            (float)fp8_min,                                                                      \
+            (float)fp8_max,                                                                      \
+            stride,                                                                             \
             scale_stride,                                                                         \
+            packed_d,                                                                             \
             rows);                                                                                \
       } else {                                                                                    \
-        per_token_group_quant_8bit_kernel<T, DST_DTYPE, true, false><<<grid, block, 0, stream>>>( \
+        rms_norm_quant_kernel<T, DST_DTYPE, true, false><<<grid, block, 0, stream>>>( \
             static_cast<T*>(input.data_ptr()),                                                    \
             output_q.data_ptr(),                                                                  \
             static_cast<float*>(output_s.data_ptr()),                                             \
@@ -177,10 +184,11 @@ void sgl_fused_rmsnorm_quant(torch::Tensor& input,
             (int32_t)group_size,                                                                  \
             (float)rms_eps,                                                                       \
             (float)quant_eps,                                                                     \
-            (float)min_8bit,                                                                      \
-            (float)max_8bit,                                                                      \
-            packed_d,                                                                             \
+            (float)fp8_min,                                                                      \
+            (float)fp8_max,                                                                      \
+            stride,                                                                             \
             scale_stride,                                                                         \
+            packed_d,                                                                             \
             rows);                                                                                \
       }                                                                                           \
     } else {                                                                                      \
@@ -193,15 +201,18 @@ void sgl_fused_rmsnorm_quant(torch::Tensor& input,
         (int32_t)group_size,                                                                      \
         (float)rms_eps,                                                                           \
         (float)quant_eps,                                                                         \
-        (float)min_8bit,                                                                          \
-        (float)max_8bit,                                                                          \
-        packed_d,                                                                                 \
+        (float)fp8_min,                                                                          \
+        (float)fp8_max,                                                                          \
+        stride,                                                                             \
         scale_stride,                                                                             \
+        packed_d,                                                                                 \
         rows);                                                                                    \
     }                                                                                             \
   } while (0)
+  auto dst_type = output_q.scalar_type();
 
   DISPATCH_PYTORCH_DTYPE_TO_CTYPE_FLOAT_FP16(input.scalar_type(), scalar_t, [&] {
+    const unsigned int packed_d = std::ceil((float)d * sizeof(scalar_t) / PACK_SIZE);
     if (dst_type == at::ScalarType::Char) {
       LAUNCH_KERNEL(scalar_t, int8_t);
       return true;
@@ -211,18 +222,18 @@ void sgl_fused_rmsnorm_quant(torch::Tensor& input,
     }
     return false;
   });
-    AT_DISPATCH_FLOATING_TYPES_AND2(at::ScalarType::Half, at::ScalarType::BFloat16,
-                input.scalar_type(), "rms_norm_quant_add", ([&] {
-
-                const unsigned int packed_d = std::ceil((float)d * sizeof(scalar_t) / PACK_SIZE);
-
-                const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
-                const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-
-                rms_norm_quant_kernel<scalar_t><<<grid_size, block_size, 0, stream>>>
-                (input.data_ptr<scalar_t>(), weight.data_ptr<scalar_t>(),
-                 static_cast<FP8_TYPE*>(output_q.data_ptr()),
-                 output_s.data_ptr<float>(),
-                 packed_d, rows, eps, stride, s_stride);
-                }));
+    // AT_DISPATCH_FLOATING_TYPES_AND2(at::ScalarType::Half, at::ScalarType::BFloat16,
+    //             input.scalar_type(), "rms_norm_quant_add", ([&] {
+    //
+    //             const unsigned int packed_d = std::ceil((float)d * sizeof(scalar_t) / PACK_SIZE);
+    //
+    //             const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
+    //             const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+    //
+    //             rms_norm_quant_kernel<scalar_t><<<grid_size, block_size, 0, stream>>>
+    //             (input.data_ptr<scalar_t>(), weight.data_ptr<scalar_t>(),
+    //              static_cast<FP8_TYPE*>(output_q.data_ptr()),
+    //              output_s.data_ptr<float>(),
+    //              packed_d, rows, eps, stride, s_stride);
+    //             }));
 }
