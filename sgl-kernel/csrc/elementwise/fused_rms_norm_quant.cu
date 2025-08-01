@@ -123,7 +123,7 @@ __global__ void rms_norm_quant_kernel(scalar_t* __restrict__  input,
     }
 
 }
-void rms_norm_quant_launcher(torch::Tensor& input,
+void sgl_fused_rmsnorm_quant(torch::Tensor& input,
         torch::Tensor& output_q,
         torch::Tensor& output_s,
         torch::Tensor& weight,
@@ -132,7 +132,8 @@ void rms_norm_quant_launcher(torch::Tensor& input,
         double quant_eps,
         double fp8_min,
         double fp8_max,
-        bool scale_ue8m0)
+        bool scale_ue8m0,
+        bool enable_pdl)
 {
     const unsigned int d = input.size(-1);
     const unsigned int rows = input.size(-2);
@@ -141,6 +142,10 @@ void rms_norm_quant_launcher(torch::Tensor& input,
 
     dim3 block_size = dim3(RMS_BLOCK_SIZE, 1, 1);
     dim3 grid_size = dim3(rows, 1, 1);
+    cudaLaunchAttribute attribute[1];
+    attribute[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
+    attribute[0].val.programmaticStreamSerializationAllowed = enable_pdl;
+
 
 #define LAUNCH_KERNEL(T, DST_DTYPE)                                                               \
   do {                                                                                            \
@@ -148,7 +153,9 @@ void rms_norm_quant_launcher(torch::Tensor& input,
     dim3 block(rows);                                                                             \
     if (is_column_major) {                                                                        \
       if (scale_ue8m0) {                                                                          \
-        per_token_group_quant_8bit_kernel<T, DST_DTYPE, true, true><<<grid, block, 0, stream>>>(  \
+        auto kern = per_token_group_quant_8bit_kernel<T, DST_DTYPE, true, true>                   \
+          <<<grid, block, 0, stream>>>;                                                           \
+          cudaLaunchKernelEx(&config                                                              \
             static_cast<T*>(input.data_ptr()),                                                    \
             output_q.data_ptr(),                                                                  \
             static_cast<uint32_t*>(output_s.data_ptr()),                                          \
