@@ -20,6 +20,7 @@ import torch
 import torch.nn as nn
 
 from sglang.srt.custom_op import CustomOp
+from sglang.srt.layers.quantization.fp8_kernel import fp8_max, fp8_min, fp8_dtype, get_per_token_group_quant_tensors
 from sglang.srt.utils import (
     cpu_has_amx_support,
     get_bool_env_var,
@@ -39,6 +40,7 @@ _is_cpu = is_cpu()
 if _is_cuda:
     from sgl_kernel import (
         fused_add_rmsnorm,
+        fused_rmsnorm_quant,
         gemma_fused_add_rmsnorm,
         gemma_rmsnorm,
         rmsnorm,
@@ -51,24 +53,24 @@ elif _is_hip:
     from vllm._custom_ops import fused_add_rms_norm, rms_norm
 
 logger = logging.getLogger(__name__)
-from torch.utils.cpp_extension import load
-from sglang.srt.layers.quantization.fp8_kernel import per_token_group_quant_fp8, sglang_per_token_group_quant_fp8
-# NOBODY LIKES MANUALLY CASTING!
-torch.utils.cpp_extension.COMMON_NVCC_FLAGS = [
-    # '-D__CUDA_NO_HALF_OPERATORS__',
-    # '-D__CUDA_NO_HALF_CONVERSIONS__',
-    # '-D__CUDA_NO_BFLOAT16_CONVERSIONS__',
-    # '-D__CUDA_NO_HALF2_OPERATORS__',
-    '--expt-relaxed-constexpr'
-]
-
-import pathlib
-KERNEL_BASE = pathlib.Path(__file__).parent.resolve() / "../../../.."
-cu_ext = load(name='my_ext', sources=[f"{KERNEL_BASE}/my_kernels/interface.cpp",
-                                      f"{KERNEL_BASE}/my_kernels/kernels.cu",
-                                      f"{KERNEL_BASE}/my_kernels/kernels_fused.cu", ],
-              extra_include_paths=["/usr/local/lib/python3.10/dist-packages/flashinfer/data/include/"],
-              verbose=True, extra_cuda_cflags=[f"-lineinfo", "--use_fast_math", "-O3"])
+# from torch.utils.cpp_extension import load
+# from sglang.srt.layers.quantization.fp8_kernel import per_token_group_quant_fp8, sglang_per_token_group_quant_fp8
+# # NOBODY LIKES MANUALLY CASTING!
+# torch.utils.cpp_extension.COMMON_NVCC_FLAGS = [
+#     # '-D__CUDA_NO_HALF_OPERATORS__',
+#     # '-D__CUDA_NO_HALF_CONVERSIONS__',
+#     # '-D__CUDA_NO_BFLOAT16_CONVERSIONS__',
+#     # '-D__CUDA_NO_HALF2_OPERATORS__',
+#     '--expt-relaxed-constexpr'
+# ]
+#
+# import pathli
+# KERNEL_BASE = pathlib.Path(__file__).parent.resolve() / "../../../.."
+# cu_ext = load(name='my_ext', sources=[f"{KERNEL_BASE}/my_kernels/interface.cpp",
+#                                       f"{KERNEL_BASE}/my_kernels/kernels.cu",
+#                                       f"{KERNEL_BASE}/my_kernels/kernels_fused.cu", ],
+#               extra_include_paths=["/usr/local/lib/python3.10/dist-packages/flashinfer/data/include/"],
+#               verbose=True, extra_cuda_cflags=[f"-lineinfo", "--use_fast_math", "-O3"])
 
 if is_npu():
     import torch_npu
@@ -79,13 +81,29 @@ class RMSNorm(CustomOp):
         self,
         hidden_size: int,
         eps: float = 1e-6,
-        output_quant=False,
+        output_quant: bool = False,
+        group_size: Optional[int] = None,
+        column_major_scales: bool = False,
+        scale_tma_aligned: bool = False,
+        scale_ue8m0: bool = False,
+        quant_eps: float = 1e-10
     ) -> None:
         super().__init__()
         self.weight = nn.Parameter(torch.randn(hidden_size))
         # self.weight = nn.Parameter(torch.ones(hidden_size))
         self.variance_epsilon = eps
-        self.output_quant = output_quant
+
+        self.output_quant = output_quant if _is_cuda else False
+        if self.output_quant:
+            assert group_size is not None, "To output quants in RMS norm we need group size set"
+            self.group_size = group_size
+        self.column_major_scales = column_major_scales
+        self.scale_tma_aligned = scale_tma_aligned
+        self.scale_ue8m0 = scale_ue8m0
+        if self.scale_ue8m0:
+            assert self.column_major_scales and self.scale_tma_aligned
+        self.quant_eps = quant_eps
+
         if _use_aiter:
             self._forward_method = self.forward_aiter
 
@@ -94,35 +112,18 @@ class RMSNorm(CustomOp):
         x: torch.Tensor,
         residual: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
-        # if self.output_quant:
-        #     q = torch.empty(x.shape, dtype=torch.float8_e4m3fn, device=x.device)
-        #     # s = torch.empty((*x.shape[:-1], x.shape[-1]//128), dtype=torch.float32, device=x.device)
-        #     aligned_size = (x.shape[-2] + 3) // 4 * 4
-        #     s = torch.empty(
-        #         x.shape[:-2] + (x.shape[-1] // 128, aligned_size),
-        #         device=x.device,
-        #         dtype=torch.float32,
-        #     ).permute(-1, -2)[: x.shape[-2], :]
-        #     if residual is not None:
-        #         # fused_add_rmsnorm(x, residual, self.weight.data, self.variance_epsilon)
-        #         cu_ext.rms_norm_quant_add(x, residual, q, s, self.weight.data, self.variance_epsilon)
-        #         return (q, s), residual
-        #     out = rmsnorm(x, self.weight.data, self.variance_epsilon)
-        #     cu_ext.rms_norm_quant(x, q, s, self.weight.data, self.variance_epsilon)
-        #     return (q, s, out, x, self)
         if self.output_quant:
-            q = torch.empty(x.shape, dtype=torch.float8_e4m3fn, device=x.device)
-            aligned_size = (x.shape[-2] + 3) // 4 * 4
-            s = torch.empty(
-                x.shape[:-2] + (x.shape[-1] // 128, aligned_size),
-                device=x.device,
-                dtype=torch.float32,
-            ).permute(-1, -2)[: x.shape[-2], :]
+            q, s = get_per_token_group_quant_tensors(x,
+                                                     self.group_size,
+                                                     self.column_major_scales,
+                                                     self.scale_tma_aligned,
+                                                     self.scale_ue8m0)
             if residual is not None:
                 # fused_add_rmsnorm(x, residual, self.weight.data, self.variance_epsilon)
-                cu_ext.rms_norm_quant_add(x, residual, q, s, self.weight.data, self.variance_epsilon)
+                # cu_ext.rms_norm_quant_add(x, residual, q, s, self.weight.data, self.variance_epsilon)
                 return (q, s), residual
-            cu_ext.rms_norm_quant(x, q, s, self.weight.data, self.variance_epsilon)
+            fused_rmsnorm_quant(x, q, s, self.weight.data, self.group_size, self.variance_epsilon,
+                                self.quant_eps, fp8_min, fp8_max, self.scale_ue8m0)
             return (q, s)
         else:
             if residual is not None:
