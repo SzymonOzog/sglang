@@ -1,4 +1,5 @@
 #include <cuda.h>
+#include <iostream>
 #include <cuda_runtime.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
@@ -56,10 +57,11 @@ __global__ void rms_norm_quant_kernel(scalar_t* __restrict__  input,
         }
 
     }
-    for (int mask = 16; mask>0; mask/=2)
-    {
-      acc += __shfl_xor_sync(0xffffffff, acc, mask, 32);
-    }
+    acc += __shfl_xor_sync(0xffffffff, acc, 16, 32);
+    acc += __shfl_xor_sync(0xffffffff, acc, 8, 32);
+    acc += __shfl_xor_sync(0xffffffff, acc, 4, 32);
+    acc += __shfl_xor_sync(0xffffffff, acc, 2, 32);
+    acc += __shfl_xor_sync(0xffffffff, acc, 1, 32);
 
     if(threadIdx.x%32 == 0)
     {
@@ -98,17 +100,48 @@ __global__ void rms_norm_quant_kernel(scalar_t* __restrict__  input,
             local_absmax = fmaxf(local_absmax, fabsf(val));
             interm.data[i] = val;
         }
-        local_absmax = fmaxf(local_absmax, __shfl_xor_sync(0xffffffff, local_absmax, 8));
-        local_absmax = fmaxf(local_absmax, __shfl_xor_sync(0xffffffff, local_absmax, 4));
-        local_absmax = fmaxf(local_absmax, __shfl_xor_sync(0xffffffff, local_absmax, 2));
-        local_absmax = fmaxf(local_absmax, __shfl_xor_sync(0xffffffff, local_absmax, 1));
+        for (int mask = group_size/16; mask>0; mask/=2)
+        {
+            local_absmax = fmaxf(local_absmax, __shfl_xor_sync(0xffffffff, local_absmax, mask));
+        }
 
         float y_s = (local_absmax/fp8_max);
+        using scale_element_t = std::conditional_t<SCALE_UE8M0, uint8_t, float>;
+        scale_element_t s;
+        if constexpr (SCALE_UE8M0)
+        {
+            y_s = exp2f(ceilf(log2f(fmaxf(fabsf(y_s), 1e-10f))));
+            s = (uint8_t)(((int)log2f(y_s)) + 127);
+        }
+        else
+        {
+            s = y_s;
+        }
         if (threadIdx.x%(group_size/P::size) == 0)
         {
-            int col = (idx * P::size) / group_size;
-            const int off = (col)*s_stride + row;
-            __stcg(&output_s[off], y_s);
+            int off;
+            if constexpr (IS_COLUMN_MAJOR)
+            {
+                const int num_elems_per_pack = static_cast<int>(sizeof(scale_packed_t) / sizeof(scale_element_t));
+                int col_raw = (idx * P::size) / group_size;
+                int col = col_raw/num_elems_per_pack;
+                int pack = col_raw%num_elems_per_pack;
+                off = col*num_elems_per_pack*s_stride + row * num_elems_per_pack + pack;
+                // printf("saving %d, row %d, col %d, pack %d, stride %d, elems %d\n",
+                //         (int)s,
+                //         (int)row,
+                //         (int)col,
+                //         (int)pack,
+                //         (int)s_stride,
+                //         (int)num_elems_per_pack);
+            }
+            else
+            {
+                int col = (idx * P::size) / group_size;
+                off = row*(d*P::size)/group_size + col;
+
+            }
+            __stcg(reinterpret_cast<scale_element_t*>(output_s) + off, s);
         }
 
         O out;
@@ -117,6 +150,10 @@ __global__ void rms_norm_quant_kernel(scalar_t* __restrict__  input,
             float q = (float)interm.data[i]/y_s;
             q = fminf(fmaxf(q, fp8_min), fp8_max);
             out.data[i] = DST_DTYPE(q);
+            if (row == 6 && idx * P::size + i > 4608 && row == 6 && idx * P::size + i < 4628)
+            {
+                printf("saving %f, scale %f\n", q, y_s);
+            }
 
         }
         __stcg(&reinterpret_cast<int2*>(output_q)[row * d + idx],
@@ -147,13 +184,15 @@ void sgl_fused_rmsnorm_quant(torch::Tensor& input,
     attributes[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
     attributes[0].val.programmaticStreamSerializationAllowed = enable_pdl;
     const bool is_column_major = output_s.stride(0) < output_s.stride(1);
-    const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+    cudaStream_t stream = at::cuda::getCurrentCUDAStream();
     cudaLaunchConfig_t config;
     config.gridDim = grid;
     config.blockDim = block;
     config.stream = stream;
+    config.dynamicSmemBytes = 0;
     config.numAttrs = 1;
     config.attrs = attributes;
+    std::cout<<"running kernel "<<grid.x<<" "<<block.x<<" "<< is_column_major<<std::endl;
 
 
 #define LAUNCH_KERNEL(T, DST_DTYPE)                                                               \
@@ -176,7 +215,8 @@ void sgl_fused_rmsnorm_quant(torch::Tensor& input,
             packed_d,                                                                             \
             rows);                                                                                \
       } else {                                                                                    \
-        rms_norm_quant_kernel<T, DST_DTYPE, true, false><<<grid, block, 0, stream>>>( \
+    std::cout<<"running kernel "<<grid.x<<" "<<block.x<<std::endl;                            \
+        rms_norm_quant_kernel<T, DST_DTYPE, true, false><<<grid, block>>>( \
             static_cast<T*>(input.data_ptr()),                                                    \
             output_q.data_ptr(),                                                                  \
             static_cast<float*>(output_s.data_ptr()),                                             \
@@ -193,7 +233,8 @@ void sgl_fused_rmsnorm_quant(torch::Tensor& input,
       }                                                                                           \
     } else {                                                                                      \
       assert(!scale_ue8m0);                                                                       \
-      rms_norm_quant_kernel<T, DST_DTYPE, false><<<grid, block, 0, stream>>>(                     \
+    std::cout<<"running ncm kernel "<<grid.x<<" "<<block.x<<std::endl;                            \
+      rms_norm_quant_kernel<T, DST_DTYPE, false><<<grid, block>>>(                     \
         static_cast<T*>(input.data_ptr()),                                                        \
         output_q.data_ptr(),                                                                      \
         static_cast<float*>(output_s.data_ptr()),                                                 \
