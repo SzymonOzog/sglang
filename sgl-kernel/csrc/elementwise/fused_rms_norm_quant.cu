@@ -7,7 +7,6 @@
 #include <flashinfer/vec_dtypes.cuh>
 #include "utils.h"
 
-using FP8_TYPE = c10::Float8_e4m3fn;
 #define RMS_BLOCK_SIZE 256
 #define PACK_SIZE 16
 
@@ -15,16 +14,16 @@ using FP8_TYPE = c10::Float8_e4m3fn;
 // goal: generate ld.128 and st.128 instructions
 template <typename T, int sz>
 struct __align__(alignof(T) * sz) array_t {
-  T data[sz];
-  using type = T;
-  static constexpr int size = sz;
+    T data[sz];
+    using type = T;
+    static constexpr int size = sz;
 };
 
 template <
-    typename scalar_t,
-    typename DST_DTYPE,
-    bool IS_COLUMN_MAJOR = false,
-    bool SCALE_UE8M0 = false,
+typename scalar_t,
+         typename DST_DTYPE,
+         bool IS_COLUMN_MAJOR = false,
+         bool SCALE_UE8M0 = false,
     typename scale_packed_t = std::conditional_t<SCALE_UE8M0, uint32_t, float>>
 __global__ void rms_norm_quant_kernel(scalar_t* __restrict__  input,
         void* __restrict__  output_q_v,
@@ -42,17 +41,17 @@ __global__ void rms_norm_quant_kernel(scalar_t* __restrict__  input,
         const unsigned int rows)
 {
     DST_DTYPE* output_q = reinterpret_cast<DST_DTYPE*>(output_q_v);
-    int64_t row = blockIdx.x;
-    int64_t tx = threadIdx.x;
-    int64_t warp_id = tx/32;
+    int row = blockIdx.x;
+    int tx = threadIdx.x;
+    int warp_id = tx/32;
     using P = array_t<scalar_t, PACK_SIZE / sizeof(scalar_t)>;
     float acc = 0.f;
     __shared__ float reduction[RMS_BLOCK_SIZE/32];
-    for(int64_t idx = tx; idx<d; idx+=blockDim.x)
+    for(int idx = tx; idx<d; idx+=blockDim.x)
     {
         P x = reinterpret_cast<P*>(input + row*stride)[idx];
 
-        for (int64_t i = 0; i<P::size; i++)
+        for (int i = 0; i<P::size; i++)
         {
             acc += (float)x.data[i] * (float)x.data[i];
         }
@@ -64,7 +63,7 @@ __global__ void rms_norm_quant_kernel(scalar_t* __restrict__  input,
     acc += __shfl_xor_sync(0xffffffff, acc, 2, 32);
     acc += __shfl_xor_sync(0xffffffff, acc, 1, 32);
 
-    if(threadIdx.x%32 == 0)
+    if(tx%32 == 0)
     {
         reduction[warp_id] = acc;
     }
@@ -89,13 +88,13 @@ __global__ void rms_norm_quant_kernel(scalar_t* __restrict__  input,
     __syncthreads();
     acc = reduction[0];
     using O = array_t<DST_DTYPE, P::size>;
-    for(int64_t idx = tx; idx<d; idx+=blockDim.x)
+    for(int idx = tx; idx<d; idx+=blockDim.x)
     {
         float local_absmax = quant_eps;
         P x = reinterpret_cast<P*>(input + row*stride)[idx];
         P w = reinterpret_cast<P*>(weight)[idx];
         P interm;
-        for (int64_t i = 0; i<P::size; i++)
+        for (int i = 0; i<P::size; i++)
         {
             float val = (float)x.data[i] * acc * (float)w.data[i];
             local_absmax = fmaxf(local_absmax, fabsf(val));
@@ -117,7 +116,7 @@ __global__ void rms_norm_quant_kernel(scalar_t* __restrict__  input,
         {
             s = y_s;
         }
-        if (threadIdx.x%(group_size/P::size) == 0)
+        if (tx%(group_size/P::size) == 0)
         {
             int off;
             if constexpr (IS_COLUMN_MAJOR)
@@ -139,18 +138,17 @@ __global__ void rms_norm_quant_kernel(scalar_t* __restrict__  input,
         }
 
         O out;
-        for (int64_t i = 0; i<P::size; i++)
+        for (int i = 0; i<P::size; i++)
         {
             float q = (float)interm.data[i]/y_s;
             q = fminf(fmaxf(q, fp8_min), fp8_max);
             out.data[i] = DST_DTYPE(q);
-            int group = (row*d*P::size + idx*P::size)/group_size;
         }
         __stcg(&reinterpret_cast<int2*>(output_q)[row * d + idx],
                 *reinterpret_cast<int2*>(&out));
     }
-
 }
+
 void sgl_fused_rmsnorm_quant(torch::Tensor& input,
         torch::Tensor& output_q,
         torch::Tensor& output_s,
@@ -187,88 +185,74 @@ void sgl_fused_rmsnorm_quant(torch::Tensor& input,
 
 
 #define LAUNCH_KERNEL(T, DST_DTYPE)                                                               \
-  do {                                                                                            \
-    if (is_column_major) {                                                                        \
-      if (scale_ue8m0) {                                                                          \
-        auto kern = rms_norm_quant_kernel<T, DST_DTYPE, true, true>;                   \
-          cudaLaunchKernelEx(&config, kern,                                                              \
-            static_cast<T*>(input.data_ptr()),                                                    \
-            output_q.data_ptr(),                                                                  \
-            static_cast<uint32_t*>(output_s.data_ptr()),                                          \
-            static_cast<T*>(weight.data_ptr()),                                                   \
-            (int32_t)group_size,                                                                  \
-            (float)rms_eps,                                                                       \
-            (float)quant_eps,                                                                     \
-            (float)fp8_min,                                                                      \
-            (float)fp8_max,                                                                      \
-            stride,                                                                             \
-            scale_stride,                                                                         \
-            scale_rows,                                                                         \
-            packed_d,                                                                             \
-            rows);                                                                                \
-      } else {                                                                                    \
-    std::cout<<"running kernel "<<grid.x<<" "<<block.x<<std::endl;                            \
-        rms_norm_quant_kernel<T, DST_DTYPE, true, false><<<grid, block>>>( \
-            static_cast<T*>(input.data_ptr()),                                                    \
-            output_q.data_ptr(),                                                                  \
-            static_cast<float*>(output_s.data_ptr()),                                             \
-            static_cast<T*>(weight.data_ptr()),                                                   \
-            (int32_t)group_size,                                                                  \
-            (float)rms_eps,                                                                       \
-            (float)quant_eps,                                                                     \
-            (float)fp8_min,                                                                      \
-            (float)fp8_max,                                                                      \
-            stride,                                                                             \
-            scale_stride,                                                                         \
-            scale_rows,                                                                         \
-            packed_d,                                                                             \
-            rows);                                                                                \
-      }                                                                                           \
-    } else {                                                                                      \
-      assert(!scale_ue8m0);                                                                       \
-    std::cout<<"running ncm kernel "<<grid.x<<" "<<block.x<<std::endl;                            \
-      rms_norm_quant_kernel<T, DST_DTYPE, false><<<grid, block>>>(                     \
-        static_cast<T*>(input.data_ptr()),                                                        \
-        output_q.data_ptr(),                                                                      \
-        static_cast<float*>(output_s.data_ptr()),                                                 \
-        static_cast<T*>(weight.data_ptr()),                                                       \
-        (int32_t)group_size,                                                                      \
-        (float)rms_eps,                                                                           \
-        (float)quant_eps,                                                                         \
-        (float)fp8_min,                                                                          \
-        (float)fp8_max,                                                                          \
-        stride,                                                                             \
-        scale_stride,                                                                             \
-        scale_rows,                                                                         \
-        packed_d,                                                                                 \
-        rows);                                                                                    \
-    }                                                                                             \
-  } while (0)
-  auto dst_type = output_q.scalar_type();
+    do {                                                                                            \
+        if (is_column_major) {                                                                        \
+            if (scale_ue8m0) {                                                                          \
+                auto kern = rms_norm_quant_kernel<T, DST_DTYPE, true, true>;                   \
+                cudaLaunchKernelEx(&config, kern,                                                              \
+                        static_cast<T*>(input.data_ptr()),                                                    \
+                        output_q.data_ptr(),                                                                  \
+                        static_cast<uint32_t*>(output_s.data_ptr()),                                          \
+                        static_cast<T*>(weight.data_ptr()),                                                   \
+                        (int32_t)group_size,                                                                  \
+                        (float)rms_eps,                                                                       \
+                        (float)quant_eps,                                                                     \
+                        (float)fp8_min,                                                                      \
+                        (float)fp8_max,                                                                      \
+                        stride,                                                                             \
+                        scale_stride,                                                                         \
+                        scale_rows,                                                                         \
+                        packed_d,                                                                             \
+                        rows);                                                                                \
+            } else {                                                                                    \
+                std::cout<<"running kernel "<<grid.x<<" "<<block.x<<std::endl;                            \
+                rms_norm_quant_kernel<T, DST_DTYPE, true, false><<<grid, block>>>( \
+                        static_cast<T*>(input.data_ptr()),                                                    \
+                        output_q.data_ptr(),                                                                  \
+                        static_cast<float*>(output_s.data_ptr()),                                             \
+                        static_cast<T*>(weight.data_ptr()),                                                   \
+                        (int32_t)group_size,                                                                  \
+                        (float)rms_eps,                                                                       \
+                        (float)quant_eps,                                                                     \
+                        (float)fp8_min,                                                                      \
+                        (float)fp8_max,                                                                      \
+                        stride,                                                                             \
+                        scale_stride,                                                                         \
+                        scale_rows,                                                                         \
+                        packed_d,                                                                             \
+                        rows);                                                                                \
+            }                                                                                           \
+        } else {                                                                                      \
+            assert(!scale_ue8m0);                                                                       \
+            std::cout<<"running ncm kernel "<<grid.x<<" "<<block.x<<std::endl;                            \
+            rms_norm_quant_kernel<T, DST_DTYPE, false><<<grid, block>>>(                     \
+                    static_cast<T*>(input.data_ptr()),                                                        \
+                    output_q.data_ptr(),                                                                      \
+                    static_cast<float*>(output_s.data_ptr()),                                                 \
+                    static_cast<T*>(weight.data_ptr()),                                                       \
+                    (int32_t)group_size,                                                                      \
+                    (float)rms_eps,                                                                           \
+                    (float)quant_eps,                                                                         \
+                    (float)fp8_min,                                                                          \
+                    (float)fp8_max,                                                                          \
+                    stride,                                                                             \
+                    scale_stride,                                                                             \
+                    scale_rows,                                                                         \
+                    packed_d,                                                                                 \
+                    rows);                                                                                    \
+        }                                                                                             \
+    } while (0)
+    auto dst_type = output_q.scalar_type();
 
-  DISPATCH_PYTORCH_DTYPE_TO_CTYPE_FLOAT_FP16(input.scalar_type(), scalar_t, [&] {
-    const unsigned int packed_d = std::ceil((float)d * sizeof(scalar_t) / PACK_SIZE);
-    if (dst_type == at::ScalarType::Char) {
-      LAUNCH_KERNEL(scalar_t, int8_t);
-      return true;
-    } else if (dst_type == at::ScalarType::Float8_e4m3fn) {
-      LAUNCH_KERNEL(scalar_t, c10::Float8_e4m3fn);
-      return true;
-    }
-    return false;
-  });
-    // AT_DISPATCH_FLOATING_TYPES_AND2(at::ScalarType::Half, at::ScalarType::BFloat16,
-    //             input.scalar_type(), "rms_norm_quant_add", ([&] {
-    //
-    //             const unsigned int packed_d = std::ceil((float)d * sizeof(scalar_t) / PACK_SIZE);
-    //
-    //             const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
-    //             const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-    //
-    //             rms_norm_quant_kernel<scalar_t><<<grid_size, block_size, 0, stream>>>
-    //             (input.data_ptr<scalar_t>(), weight.data_ptr<scalar_t>(),
-    //              static_cast<FP8_TYPE*>(output_q.data_ptr()),
-    //              output_s.data_ptr<float>(),
-    //              packed_d, rows, eps, stride, s_stride);
-    //             }));
+    DISPATCH_PYTORCH_DTYPE_TO_CTYPE_FLOAT_FP16(input.scalar_type(), scalar_t, [&] {
+            const unsigned int packed_d = std::ceil((float)d * sizeof(scalar_t) / PACK_SIZE);
+            if (dst_type == at::ScalarType::Char) {
+            LAUNCH_KERNEL(scalar_t, int8_t);
+            return true;
+            } else if (dst_type == at::ScalarType::Float8_e4m3fn) {
+            LAUNCH_KERNEL(scalar_t, c10::Float8_e4m3fn);
+            return true;
+            }
+            return false;
+            });
 }
