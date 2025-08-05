@@ -37,6 +37,7 @@ __global__ void rms_norm_quant_kernel(scalar_t* __restrict__  input,
         const float fp8_max,
         const unsigned int stride,
         const unsigned int s_stride,
+        const unsigned int s_rows,
         const unsigned int d,
         const unsigned int rows)
 {
@@ -108,9 +109,8 @@ __global__ void rms_norm_quant_kernel(scalar_t* __restrict__  input,
         float y_s = (local_absmax/fp8_max);
         using scale_element_t = std::conditional_t<SCALE_UE8M0, uint8_t, float>;
         scale_element_t s;
-        if constexpr (SCALE_UE8M0)
-        {
-            y_s = exp2f(ceilf(log2f(fmaxf(fabsf(y_s), 1e-10f))));
+        if constexpr (SCALE_UE8M0) {
+            y_s = exp2f(log2f(fmaxf(y_s, quant_eps)));
             s = (uint8_t)(((int)log2f(y_s)) + 127);
         }
         else
@@ -123,17 +123,11 @@ __global__ void rms_norm_quant_kernel(scalar_t* __restrict__  input,
             if constexpr (IS_COLUMN_MAJOR)
             {
                 const int num_elems_per_pack = static_cast<int>(sizeof(scale_packed_t) / sizeof(scale_element_t));
-                int col_raw = (idx * P::size) / group_size;
+                int col_raw = (((row*d + idx)*P::size)/group_size) % (s_rows*num_elems_per_pack);
+                int row_s = (((row*d + idx)*P::size)/group_size) / (s_rows*num_elems_per_pack);
                 int col = col_raw/num_elems_per_pack;
                 int pack = col_raw%num_elems_per_pack;
-                off = col*num_elems_per_pack*s_stride + row * num_elems_per_pack + pack;
-                // printf("saving %d, row %d, col %d, pack %d, stride %d, elems %d\n",
-                //         (int)s,
-                //         (int)row,
-                //         (int)col,
-                //         (int)pack,
-                //         (int)s_stride,
-                //         (int)num_elems_per_pack);
+                off = col*num_elems_per_pack*s_stride + row_s * num_elems_per_pack + pack;
             }
             else
             {
@@ -150,11 +144,7 @@ __global__ void rms_norm_quant_kernel(scalar_t* __restrict__  input,
             float q = (float)interm.data[i]/y_s;
             q = fminf(fmaxf(q, fp8_min), fp8_max);
             out.data[i] = DST_DTYPE(q);
-            if (row == 6 && idx * P::size + i > 4608 && row == 6 && idx * P::size + i < 4628)
-            {
-                printf("saving %f, scale %f\n", q, y_s);
-            }
-
+            int group = (row*d*P::size + idx*P::size)/group_size;
         }
         __stcg(&reinterpret_cast<int2*>(output_q)[row * d + idx],
                 *reinterpret_cast<int2*>(&out));
@@ -177,6 +167,8 @@ void sgl_fused_rmsnorm_quant(torch::Tensor& input,
     const unsigned int rows = input.size(-2);
     const unsigned int stride = input.stride(-2);
     const unsigned int scale_stride = output_s.stride(1);
+    const unsigned int scale_rows = output_s.size(1);
+
     dim3 grid(rows);
     dim3 block(RMS_BLOCK_SIZE);
 
@@ -192,7 +184,6 @@ void sgl_fused_rmsnorm_quant(torch::Tensor& input,
     config.dynamicSmemBytes = 0;
     config.numAttrs = 1;
     config.attrs = attributes;
-    std::cout<<"running kernel "<<grid.x<<" "<<block.x<<" "<< is_column_major<<std::endl;
 
 
 #define LAUNCH_KERNEL(T, DST_DTYPE)                                                               \
@@ -212,6 +203,7 @@ void sgl_fused_rmsnorm_quant(torch::Tensor& input,
             (float)fp8_max,                                                                      \
             stride,                                                                             \
             scale_stride,                                                                         \
+            scale_rows,                                                                         \
             packed_d,                                                                             \
             rows);                                                                                \
       } else {                                                                                    \
@@ -228,6 +220,7 @@ void sgl_fused_rmsnorm_quant(torch::Tensor& input,
             (float)fp8_max,                                                                      \
             stride,                                                                             \
             scale_stride,                                                                         \
+            scale_rows,                                                                         \
             packed_d,                                                                             \
             rows);                                                                                \
       }                                                                                           \
@@ -246,6 +239,7 @@ void sgl_fused_rmsnorm_quant(torch::Tensor& input,
         (float)fp8_max,                                                                          \
         stride,                                                                             \
         scale_stride,                                                                             \
+        scale_rows,                                                                         \
         packed_d,                                                                                 \
         rows);                                                                                    \
     }                                                                                             \
