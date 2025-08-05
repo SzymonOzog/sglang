@@ -41,6 +41,7 @@ if _is_cuda:
     from sgl_kernel import (
         fused_add_rmsnorm,
         fused_rmsnorm_quant,
+        fused_add_rmsnorm_quant,
         gemma_fused_add_rmsnorm,
         gemma_rmsnorm,
         rmsnorm,
@@ -96,6 +97,7 @@ class RMSNorm(CustomOp):
         self.output_quant = output_quant if _is_cuda else False
         if self.output_quant:
             assert group_size is not None, "To output quants in RMS norm we need group size set"
+            assert hidden_size % group_size == 0, f"Hidden size must be a multiple of group size got {hidden_size=} {group_size=}"
             self.group_size = group_size
         self.column_major_scales = column_major_scales
         self.scale_tma_aligned = scale_tma_aligned
@@ -119,11 +121,11 @@ class RMSNorm(CustomOp):
                                                      self.scale_tma_aligned,
                                                      self.scale_ue8m0)
             if residual is not None:
-                # fused_add_rmsnorm(x, residual, self.weight.data, self.variance_epsilon)
-                # cu_ext.rms_norm_quant_add(x, residual, q, s, self.weight.data, self.variance_epsilon)
+                fused_add_rmsnorm_quant(x, residual, q, s, self.weight, self.group_size, self.quant_eps,
+                                fp8_min, fp8_max, self.scale_ue8m0, rms_eps=self.variance_epsilon)
                 return (q, s), residual
-            fused_rmsnorm_quant(x, q, s, self.weight.data, self.group_size, self.variance_epsilon,
-                                self.quant_eps, fp8_min, fp8_max, self.scale_ue8m0)
+            fused_rmsnorm_quant(x, q, s, self.weight, self.group_size, self.quant_eps,
+                                fp8_min, fp8_max, self.scale_ue8m0, rms_eps=self.variance_epsilon)
             return (q, s)
         else:
             if residual is not None:
