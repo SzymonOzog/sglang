@@ -25,7 +25,8 @@ typename scalar_t,
          bool IS_COLUMN_MAJOR = false,
          bool SCALE_UE8M0 = false,
     typename scale_packed_t = std::conditional_t<SCALE_UE8M0, uint32_t, float>>
-__global__ void rms_norm_quant_kernel(scalar_t* __restrict__  input,
+__global__ void fused_add_rms_norm_quant_kernel(scalar_t* __restrict__  input,
+        scalar_t* __restrict__  residual,
         void* __restrict__  output_q_v,
         scale_packed_t* __restrict__ output_s,
         scalar_t* __restrict__  weight,
@@ -35,6 +36,7 @@ __global__ void rms_norm_quant_kernel(scalar_t* __restrict__  input,
         const float fp8_min,
         const float fp8_max,
         const unsigned int stride,
+        const unsigned int r_stride,
         const unsigned int s_stride,
         const unsigned int s_rows,
         const unsigned int d,
@@ -47,16 +49,22 @@ __global__ void rms_norm_quant_kernel(scalar_t* __restrict__  input,
     using P = array_t<scalar_t, PACK_SIZE / sizeof(scalar_t)>;
     float acc = 0.f;
     __shared__ float reduction[RMS_BLOCK_SIZE/32];
+    
+    // Step 1: Add residual and compute sum of squares
     for(int idx = tx; idx<d; idx+=blockDim.x)
     {
         P x = reinterpret_cast<P*>(input + row*stride)[idx];
+        P r = reinterpret_cast<P*>(residual + row*r_stride)[idx];
 
         for (int i = 0; i<P::size; i++)
         {
+            x.data[i] += r.data[i];
             acc += (float)x.data[i] * (float)x.data[i];
         }
-
+        // Store back the sum to residual
+        reinterpret_cast<P*>(residual + row*r_stride)[idx] = x;
     }
+    
     acc += __shfl_xor_sync(0xffffffff, acc, 16, 32);
     acc += __shfl_xor_sync(0xffffffff, acc, 8, 32);
     acc += __shfl_xor_sync(0xffffffff, acc, 4, 32);
@@ -88,10 +96,12 @@ __global__ void rms_norm_quant_kernel(scalar_t* __restrict__  input,
     __syncthreads();
     acc = reduction[0];
     using O = array_t<DST_DTYPE, P::size>;
+    
+    // Step 2: Apply RMS norm and quantize
     for(int idx = tx; idx<d; idx+=blockDim.x)
     {
         float local_absmax = quant_eps;
-        P x = reinterpret_cast<P*>(input + row*stride)[idx];
+        P x = reinterpret_cast<P*>(residual + row*r_stride)[idx];
         P w = reinterpret_cast<P*>(weight)[idx];
         P interm;
         for (int i = 0; i<P::size; i++)
@@ -149,7 +159,8 @@ __global__ void rms_norm_quant_kernel(scalar_t* __restrict__  input,
     }
 }
 
-void sgl_fused_rmsnorm_quant(torch::Tensor& input,
+void sgl_fused_add_rmsnorm_quant(torch::Tensor& input,
+        torch::Tensor& residual,
         torch::Tensor& output_q,
         torch::Tensor& output_s,
         torch::Tensor& weight,
@@ -164,6 +175,7 @@ void sgl_fused_rmsnorm_quant(torch::Tensor& input,
     const unsigned int d = input.size(-1);
     const unsigned int rows = input.size(-2);
     const unsigned int stride = input.stride(-2);
+    const unsigned int r_stride = residual.stride(-2);
     const unsigned int scale_stride = output_s.stride(1);
     const unsigned int scale_rows = output_s.size(1);
 
@@ -188,9 +200,10 @@ void sgl_fused_rmsnorm_quant(torch::Tensor& input,
     do {                                                                                              \
         if (is_column_major) {                                                                        \
             if (scale_ue8m0) {                                                                        \
-                auto kern = rms_norm_quant_kernel<T, DST_DTYPE, true, true>;                         \
+                auto kern = fused_add_rms_norm_quant_kernel<T, DST_DTYPE, true, true>;               \
                 cudaLaunchKernelEx(&config, kern,                                                     \
                         static_cast<T*>(input.data_ptr()),                                           \
+                        static_cast<T*>(residual.data_ptr()),                                        \
                         output_q.data_ptr(),                                                         \
                         static_cast<uint32_t*>(output_s.data_ptr()),                                 \
                         static_cast<T*>(weight.data_ptr()),                                          \
@@ -200,14 +213,16 @@ void sgl_fused_rmsnorm_quant(torch::Tensor& input,
                         (float)fp8_min,                                                              \
                         (float)fp8_max,                                                              \
                         stride,                                                                      \
+                        r_stride,                                                                    \
                         scale_stride,                                                                \
                         scale_rows,                                                                  \
                         packed_d,                                                                    \
                         rows);                                                                       \
             } else {                                                                                  \
-                auto kern = rms_norm_quant_kernel<T, DST_DTYPE, true, false>;                       \
+                auto kern = fused_add_rms_norm_quant_kernel<T, DST_DTYPE, true, false>;             \
                 cudaLaunchKernelEx(&config, kern,                                                    \
                         static_cast<T*>(input.data_ptr()),                                           \
+                        static_cast<T*>(residual.data_ptr()),                                        \
                         output_q.data_ptr(),                                                         \
                         static_cast<float*>(output_s.data_ptr()),                                    \
                         static_cast<T*>(weight.data_ptr()),                                          \
@@ -217,6 +232,7 @@ void sgl_fused_rmsnorm_quant(torch::Tensor& input,
                         (float)fp8_min,                                                              \
                         (float)fp8_max,                                                              \
                         stride,                                                                      \
+                        r_stride,                                                                    \
                         scale_stride,                                                                \
                         scale_rows,                                                                  \
                         packed_d,                                                                    \
@@ -224,9 +240,10 @@ void sgl_fused_rmsnorm_quant(torch::Tensor& input,
             }                                                                                         \
         } else {                                                                                      \
             assert(!scale_ue8m0);                                                                    \
-            auto kern = rms_norm_quant_kernel<T, DST_DTYPE, false>;                                 \
+            auto kern = fused_add_rms_norm_quant_kernel<T, DST_DTYPE, false>;                       \
             cudaLaunchKernelEx(&config, kern,                                                        \
                     static_cast<T*>(input.data_ptr()),                                               \
+                    static_cast<T*>(residual.data_ptr()),                                            \
                     output_q.data_ptr(),                                                             \
                     static_cast<float*>(output_s.data_ptr()),                                        \
                     static_cast<T*>(weight.data_ptr()),                                              \
@@ -236,6 +253,7 @@ void sgl_fused_rmsnorm_quant(torch::Tensor& input,
                     (float)fp8_min,                                                                  \
                     (float)fp8_max,                                                                  \
                     stride,                                                                          \
+                    r_stride,                                                                        \
                     scale_stride,                                                                    \
                     scale_rows,                                                                      \
                     packed_d,                                                                        \
