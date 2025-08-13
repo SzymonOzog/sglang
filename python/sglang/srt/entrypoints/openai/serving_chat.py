@@ -144,6 +144,7 @@ class OpenAIServingChat(OpenAIServingBase):
                 bootstrap_room=request.bootstrap_room,
                 return_hidden_states=request.return_hidden_states,
                 rid=request.rid,
+                disable_cache=request.disable_cache,
             )
         else:
             processed_messages, prompt_ids = self._make_request_with_harmony(request)

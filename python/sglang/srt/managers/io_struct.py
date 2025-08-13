@@ -100,6 +100,9 @@ class GenerateReqInput:
     # Whether to log metrics for this request (e.g. health_generate calls do not log metrics)
     log_metrics: bool = True
 
+    # If we want to disable disc cache for this particular request
+    disable_cache: bool = True
+
     # The modalities of the image data [image, multi-images, video]
     modalities: Optional[List[str]] = None
     # The path to the LoRA adaptors
@@ -504,6 +507,9 @@ class TokenizedGenerateReqInput:
     token_ids_logprob: List[int]
     # Whether to stream output
     stream: bool
+
+    # If we want to disable disc cache for this particular request
+    disable_cache: bool = True
 
     # LoRA related
     lora_id: Optional[str] = None  # None means just use the base model
