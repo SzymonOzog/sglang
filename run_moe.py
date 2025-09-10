@@ -14,8 +14,9 @@ from sglang.srt.layers.quantization.fp8_kernel import (
 from torch.utils.cpp_extension import load
 from sgl_kernel import gelu_and_mul, silu_and_mul
 import triton.language as tl
+torch.utils.cpp_extension.COMMON_NVCC_FLAGS = []
 
-my_ext = load(name="my_ext", sources = ["interface.cpp", "fused_moe_w8a8.cu"])
+my_ext = load(name="my_ext", sources = ["interface.cpp", "fused_moe_w8a8.cu"], extra_cuda_cflags=["-lineinfo"])
 
 def get_stats(activated_experts):
     flops_1 = 2*num_tokens*w1.shape[1]*w1.shape[2]
@@ -50,13 +51,17 @@ print("")
 print(w1.dtype, w1_scale.dtype)
 
 num_tokens = 8192
-hidden_size = 7168
+hidden_size = 128
+w1 = w1[..., :128].contiguous()
+w1_scale = w1_scale[..., 0].reshape(257, 2, 1).contiguous()
+print(w1.shape, w1_scale.shape)
 top_k = 9 # 8 picked + 1 shared
 block_shape = [128, 128]
 n_experts = 257
 moe_config.inplace=False
 
-for num_tokens in [8, 256, 1024, 8192]:
+# for num_tokens in [8, 256, 1024, 8192]:
+for num_tokens in [8]:
     print("Batch size", num_tokens)
     x = torch.randn((num_tokens, hidden_size), dtype=torch.bfloat16)
     x_q, x_scale = sglang_per_token_group_quant_fp8(x, block_shape[1])
@@ -81,15 +86,22 @@ for num_tokens in [8, 256, 1024, 8192]:
     invoke_fused_moe_kernel(x, w1, None, out_triton_up, None, w1_scale, None, topk_weights, topk_ids,
                             sorted_token_ids, expert_ids, num_tokens_post_padded,
                             False, top_k, config, compute_type, True, False, False, False, False, block_shape)
-    print(out_triton_up)
     silu_and_mul(out_triton_up.view(-1, w1.shape[1]), out_triton_swiglu)
     invoke_fused_moe_kernel(out_triton_swiglu, w2, None, out_triton_down, None, w2_scale, None, topk_weights, topk_ids,
                             sorted_token_ids, expert_ids, num_tokens_post_padded,
                             True, 1, config, compute_type, True, False, False, False, False, block_shape)
     moe_sum_reduce_torch_compile(out_triton_down.view(*out_triton_down.shape), out_triton, moe_config.routed_scaling_factor)
 
+    sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(topk_ids, 16, n_experts)
     out = my_ext.fused_moe_w8a8(x_q, x_scale, w1, w1_scale, sorted_token_ids, expert_ids, num_tokens_post_padded, top_k)
 
+    # print(out_triton_up)
+    print(x[0].tolist())
+    print(out_triton_up.reshape(out.shape))
+    print(out)
+    print(out.shape)
+    print(x_scale)
+    print(w1.shape)
     # Sanity check that we implemented it all correctly
     out_layer = fused_experts(x, w1, w2, (topk_weights, topk_ids, None), moe_config,
                   use_fp8_w8a8=True, w1_scale=w1_scale, w2_scale=w2_scale, block_shape=block_shape)

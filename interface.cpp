@@ -19,7 +19,8 @@ void fused_moe_w8a8(
         const int top_k,
         int M,
         int K,
-        int N
+        int N,
+        int sorted_num
         );
 
 torch::Tensor fused_moe_launcher(
@@ -34,7 +35,7 @@ torch::Tensor fused_moe_launcher(
         )
 {
     auto options = torch::TensorOptions().dtype(at::ScalarType::BFloat16).device(w.device());
-    torch::Tensor out = torch::empty({x.size(0) * top_k, x.size(1)}, options);
+    torch::Tensor out = torch::empty({x.size(0) * top_k, w.size(1)}, options);
     fused_moe_w8a8 (
             static_cast<__nv_fp8_e4m3*>(x.data_ptr()),
             static_cast<float*>(x_scale.data_ptr()),
@@ -47,7 +48,8 @@ torch::Tensor fused_moe_launcher(
             top_k,
             x.size(0),
             x.size(1),
-            w.size(1)
+            w.size(1),
+            sorted_token_ids.size(0)
             );
     return out;
 }
