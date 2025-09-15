@@ -41,7 +41,7 @@ def get_times(kernel_name, prof):
     return ret
 
 torch.manual_seed(42)
-(w1, w2, w1_scale, w2_scale, moe_config) = torch.load("./python/sglang/moe_config.pt", weights_only=False)
+(w1, w2, w1_scale, w2_scale, moe_config) = torch.load("./moe_config.pt", weights_only=False)
 w1 = w1.to("cuda:0")
 w2 = w2.to("cuda:0")
 w1_scale = w1_scale.to("cuda:0")
@@ -51,20 +51,28 @@ print("")
 print(w1.dtype, w1_scale.dtype)
 
 num_tokens = 8192
-hidden_size = 128
-w1 = w1[..., :128].contiguous()
-w1_scale = w1_scale[..., 0].reshape(257, 2, 1).contiguous()
-print(w1.shape, w1_scale.shape)
+hidden_size = 256
 top_k = 9 # 8 picked + 1 shared
 block_shape = [128, 128]
 n_experts = 257
+
+w1_scale = torch.randn((n_experts, w1.shape[1]//block_shape[0], w1.shape[2]//block_shape[1]), dtype=w2_scale.dtype) * 0.05
+print(w1.shape)
+print(w2.shape)
+w1 = w1[..., :256].contiguous()
+w1_scale = w1_scale[..., :2].reshape(257, 2, 2).contiguous()
+w1_dq = w1.to(torch.bfloat16) * w1_scale.repeat_interleave(block_shape[0], 2).repeat_interleave(block_shape[0], 1)
+print(w1.shape, w1_scale.shape)
 moe_config.inplace=False
 
 # for num_tokens in [8, 256, 1024, 8192]:
-for num_tokens in [8]:
+for num_tokens in [16]:
     print("Batch size", num_tokens)
     x = torch.randn((num_tokens, hidden_size), dtype=torch.bfloat16)
     x_q, x_scale = sglang_per_token_group_quant_fp8(x, block_shape[1])
+    x_sc = x_scale.repeat_interleave(block_shape[0], 1)
+
+    x_dq = x_q.to(torch.bfloat16) * x_sc
     topk_weights = torch.randn((num_tokens, top_k), dtype=torch.bfloat16)
 
     config_dtype = 'fp8_w8a8'
@@ -74,7 +82,12 @@ for num_tokens in [8]:
     topk_ids = torch.arange(top_k).repeat(num_tokens,1).to(torch.int32)
 
     config = try_get_optimal_moe_config(w1.shape, w2.shape, topk_ids.shape[1], config_dtype, block_shape=block_shape, M=num_tokens)
+
+    config["BLOCK_SIZE_M"] = 16
     sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(topk_ids, config["BLOCK_SIZE_M"], n_experts)
+    # print(expert_ids)
+    # print(sorted_token_ids[:num_tokens_post_padded[0]])
+    # print(sorted_token_ids.dtype)
 
     out_triton_up = torch.empty((num_tokens, top_k, w1.shape[1]), device=x.device, dtype=x.dtype)
     out_triton_swiglu = torch.empty((num_tokens*top_k, w1.shape[1]//2), device=x.device, dtype=x.dtype)
@@ -92,16 +105,30 @@ for num_tokens in [8]:
                             True, 1, config, compute_type, True, False, False, False, False, block_shape)
     moe_sum_reduce_torch_compile(out_triton_down.view(*out_triton_down.shape), out_triton, moe_config.routed_scaling_factor)
 
-    sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(topk_ids, 16, n_experts)
-    out = my_ext.fused_moe_w8a8(x_q, x_scale, w1, w1_scale, sorted_token_ids, expert_ids, num_tokens_post_padded, top_k)
 
-    # print(out_triton_up)
-    print(x[0].tolist())
+
+    # sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(topk_ids, 16, n_experts)
+    out = my_ext.fused_moe_w8a8(x_q, x_scale, w1, w1_scale, sorted_token_ids, expert_ids, num_tokens_post_padded, top_k)
     print(out_triton_up.reshape(out.shape))
     print(out)
-    print(out.shape)
-    print(x_scale)
-    print(w1.shape)
+
+    torch.cuda.synchronize()
+    print("x")
+    for i in range(0, x_dq.shape[-1], 4):
+        print(i, ", ".join(f'{tk:.5f}' for tk in x_dq[0, i:i+4].tolist()))
+    # print("w")
+    # for i in range(0, w1_dq.shape[-1], 4):
+    #     print(i, ", ".join(f'{tk:.5f}' for tk in w1_dq[0,0 ,i:i+4].tolist()))
+    # print(w1_dq[0])
+    # print(w1[0])
+    # print(w1_scale[0])
+    # print(w1_scale.shape)
+    # print(w1.stride())
+    # print(out.shape)
+    # print(x_scale)
+    # print(w1.shape)
+
+    assert(torch.allclose(out, out_triton_up.reshape(out.shape), rtol=1e-2))
     # Sanity check that we implemented it all correctly
     out_layer = fused_experts(x, w1, w2, (topk_weights, topk_ids, None), moe_config,
                   use_fp8_w8a8=True, w1_scale=w1_scale, w2_scale=w2_scale, block_shape=block_shape)
