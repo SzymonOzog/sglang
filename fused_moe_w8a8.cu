@@ -35,12 +35,12 @@ __global__ void fused_moe_w8a8_kernel(
     if(exp_idx < 0 || exp_idx >= 257)
         printf("INVALID IDX %d, %d, %d\n",blockIdx.y, exp_idx, num_tokens_post_padded[0]);
 
-    int token_srcs[2];
-    token_srcs[0] = sorted_token_ids[blockIdx.y*BM + (lane_id>>2)];
-    token_srcs[1] = sorted_token_ids[blockIdx.y*BM + (lane_id>>2) + 8];
-    int token_offs[2];
-    token_offs[0] = sorted_token_ids[blockIdx.y*BM + (lane_id>>2)] / top_k;
-    token_offs[1] = sorted_token_ids[blockIdx.y*BM + (lane_id>>2) + 8] / top_k;
+    int token_dest[2];
+    token_dest[0] = sorted_token_ids[blockIdx.y*BM + (lane_id>>2)];
+    token_dest[1] = sorted_token_ids[blockIdx.y*BM + (lane_id>>2) + 8];
+    int token_src[2];
+    token_src[0] = sorted_token_ids[blockIdx.y*BM + (lane_id>>2)] / top_k;
+    token_src[1] = sorted_token_ids[blockIdx.y*BM + (lane_id>>2) + 8] / top_k;
 
     uint32_t tile_x[4];
     uint32_t tile_w[2];
@@ -52,13 +52,13 @@ __global__ void fused_moe_w8a8_kernel(
         const int scale_cols_w = N/block_shape[1];
 
         float scale_x[2];
-        if (token_offs[0] < M)
+        if (token_src[0] < M)
         {
-            scale_x[0] = x_scale[(token_offs[0]/block_shape[0])*scale_cols_x + block];
+            scale_x[0] = x_scale[(token_src[0]/block_shape[0])*scale_cols_x + block];
         }
-        if (token_offs[1] < M)
+        if (token_src[1] < M)
         {
-            scale_x[1] = x_scale[(token_offs[1]/block_shape[0])*scale_cols_x + block];
+            scale_x[1] = x_scale[(token_src[1]/block_shape[0])*scale_cols_x + block];
         }
 
         float scale_w = w_scale[block*scale_cols_w + w_col/block_shape[1]];
@@ -67,15 +67,15 @@ __global__ void fused_moe_w8a8_kernel(
         float acc[4] = {0.f};
         for(int k = 0; k < block_shape[0]; k += BK)
         {
-            if (token_offs[0] < M)
+            if (token_src[0] < M)
             {
-                tile_x[0] = reinterpret_cast<const uint32_t*>(x + token_offs[0]*K + k + b_off)[lane_id%4];
-                tile_x[2] = reinterpret_cast<const uint32_t*>(x + token_offs[0]*K + k + b_off + 16)[lane_id%4];
+                tile_x[0] = reinterpret_cast<const uint32_t*>(x + token_src[0]*K + k + b_off)[lane_id%4];
+                tile_x[2] = reinterpret_cast<const uint32_t*>(x + token_src[0]*K + k + b_off + 16)[lane_id%4];
             }
-            if (token_offs[1] < M)
+            if (token_src[1] < M)
             {
-                tile_x[1] = reinterpret_cast<const uint32_t*>(x + token_offs[1]*K + k + b_off)[lane_id%4];
-                tile_x[3] = reinterpret_cast<const uint32_t*>(x + token_offs[1]*K + k + b_off + 16)[lane_id%4];
+                tile_x[1] = reinterpret_cast<const uint32_t*>(x + token_src[1]*K + k + b_off)[lane_id%4];
+                tile_x[3] = reinterpret_cast<const uint32_t*>(x + token_src[1]*K + k + b_off + 16)[lane_id%4];
             }
 
             fp8 tmp[4];
@@ -94,6 +94,7 @@ __global__ void fused_moe_w8a8_kernel(
             asm volatile("mma.sync.aligned.m16n8k32.row.col.f32.e4m3.e4m3.f32 {%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, {%0, %1, %2, %3};"
                     : "+f"(acc[0]), "+f"(acc[1]), "+f"(acc[2]), "+f"(acc[3])
                     : "r"(tile_x[0]), "r"(tile_x[1]), "r"(tile_x[2]), "r"(tile_x[3]), "r"(tile_w[0]), "r"(tile_w[1]));
+
             float x_dq[8];
             for (int i = 0; i < 4; i++)
             {
@@ -102,7 +103,7 @@ __global__ void fused_moe_w8a8_kernel(
             }
             if(blockIdx.x == 0 && blockIdx.y == 0 && threadIdx.x == 0)
                 printf("mma %d, %d with %f,%f,%f,%f ||| %f, %f, %f, %f acc %f, %f, %f, %f, scale x %f,%f scale_w %f\n", k,
-                        token_offs[0],
+                        token_src[0],
                         x_dq[0],
                         x_dq[1],
                         x_dq[2],
@@ -140,18 +141,18 @@ __global__ void fused_moe_w8a8_kernel(
         f_acc[2] += scale_x[1] * scale_w * acc[2];
         f_acc[3] += scale_x[1] * scale_w * acc[3];
     }
-    if (token_offs[0] < M)
+    if (token_src[0] < M)
     {
-        out[token_srcs[0]*N + blockIdx.x * BN + (lane_id%4)*2] = f_acc[0];
-        out[token_srcs[0]*N + blockIdx.x * BN + (lane_id%4)*2 + 1] = f_acc[1];
+        out[token_dest[0]*N + blockIdx.x * BN + (lane_id%4)*2] = f_acc[0];
+        out[token_dest[0]*N + blockIdx.x * BN + (lane_id%4)*2 + 1] = f_acc[1];
     }
-    if (token_offs[1] < M)
+    if (token_src[1] < M)
     {
-        out[token_srcs[1]*N + (lane_id%4)*2] = f_acc[2];
-        out[token_srcs[1]*N + (lane_id%4)*2 + 1] = f_acc[3];
+        out[token_dest[1]*N + (lane_id%4)*2] = f_acc[2];
+        out[token_dest[1]*N + (lane_id%4)*2 + 1] = f_acc[3];
     }
     if(blockIdx.x == 0 && blockIdx.y == 0 && threadIdx.x == 0)
-        printf("finished with %d/%d, %f,%f,%f,%f\n", token_offs[0], token_offs[1],
+        printf("finished with %d/%d, %f,%f,%f,%f\n", token_src[0], token_src[1],
                 f_acc[0],
                 f_acc[1],
                 f_acc[2],
