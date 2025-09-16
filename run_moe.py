@@ -25,19 +25,19 @@ def get_stats(activated_experts):
 
     mem_1 = activated_experts*w1.shape[1]*w1.shape[2] * w1.element_size() + \
             activated_experts*w1.shape[1]//block_shape[0]*w1.shape[2]//block_shape[0] * w1_scale.element_size() + \
-            x.numel() + num_tokens*x.shape[1]//block_shape[0] * 4 + \
+            hidden_size*num_tokens + num_tokens*hidden_size//block_shape[0] * 4 + \
             top_k * num_tokens * w1.shape[2] * 2
 
     mem_2 = activated_experts*w2.shape[1]*w2.shape[2] * w2.element_size() + \
             activated_experts*w2.shape[1]//block_shape[0]*w2.shape[2]//block_shape[0] * w2_scale.element_size() + \
-            x.numel() + activated_experts*num_tokens*x.shape[1]//block_shape[0] * 4 + \
+            hidden_size*num_tokens + activated_experts*num_tokens*hidden_size//block_shape[0] * 4 + \
             num_tokens * w2.shape[2] * 2
     return flops_1, flops_2, mem_1, mem_2
 
 def get_times(kernel_name, prof):
     ret = []
     for e in prof.profiler.function_events:
-        if kernel_name == e.name:
+        if kernel_name in e.name:
             ret.append(e.device_time_total)
     return ret
 
@@ -96,6 +96,9 @@ def run_moe(topk_ids):
     # print(w1.shape)
 
     assert(torch.allclose(out, out_triton_up.reshape(out.shape), atol=atol, rtol=rtol))
+    diff = torch.abs(out-out_triton_up.reshape(out.shape))/(torch.abs(out)+1e-6)
+    mean_diff_up = diff.mean()
+    max_diff_up = diff.max()
 
     silu_and_mul(out, out_custom_swiglu)
     # idx = torch.isclose(out_custom_swiglu, out_triton_swiglu, atol=atol, rtol=rtol).logical_not()
@@ -108,6 +111,10 @@ def run_moe(topk_ids):
 
     # TODO why swiglu stacks error so much
     assert(torch.allclose(out_custom_swiglu, out_triton_swiglu, atol=100*atol, rtol=rtol))
+    diff = torch.abs(out_custom_swiglu - out_triton_swiglu)/(torch.abs(out_custom_swiglu) + 1e-6)
+    mean_diff_swiglu = diff.mean()
+    max_diff_swiglu = diff.max()
+
     out_custom_swiglu = out_triton_swiglu.clone()
     x_q, x_scale = sglang_per_token_group_quant_fp8(out_custom_swiglu, block_shape[1])
     out = my_ext.fused_moe_w8a8(x_q, x_scale, w2, w2_scale, sorted_token_ids, expert_ids, num_tokens_post_padded, 1)
@@ -123,11 +130,15 @@ def run_moe(topk_ids):
 
     # TODO swiglu too big stacks too much error
     assert(torch.allclose(out, out_triton_down.reshape(out.shape), atol=10*atol, rtol=rtol))
+    diff = torch.abs(out-out_triton_down.reshape(out.shape))/(torch.abs(out) + 1e-6)
+    mean_diff_down = diff.mean()
+    max_diff_down = diff.max()
     # Sanity check that we implemented it all correctly
     out_layer = fused_experts(x, w1, w2, (topk_weights, topk_ids, None), moe_config,
                   use_fp8_w8a8=True, w1_scale=w1_scale, w2_scale=w2_scale, block_shape=block_shape)
     # close to 0 values can have high rtol
     assert(torch.allclose(out_triton, out_layer, rtol=rtol))
+    return [mean_diff_up, max_diff_up, mean_diff_swiglu, max_diff_swiglu, mean_diff_down, max_diff_down]
 
 torch.manual_seed(42)
 (w1, w2, w1_scale, w2_scale, moe_config) = torch.load("./moe_config.pt", weights_only=False)
@@ -162,7 +173,24 @@ for num_tokens in [8, 256, 1024, 8192] if len(sys.argv) == 1 else [int(sys.argv[
 # Ideal
     print("benchmarking ideal")
     topk_ids = torch.arange(top_k).repeat(num_tokens,1).to(torch.int32)
-    run_moe(topk_ids)
+    with profile(activities=[ProfilerActivity.CUDA], record_shapes=True) as prof:
+        diffs = run_moe(topk_ids)
+    t_times = get_times("fused_moe_kernel", prof)
+    cu_times = get_times("fused_moe_w8a8_kernel", prof)
+
+    f1,f2, m1,m2 = get_stats(len(set(topk_ids.flatten().tolist())))
+    print(f"Triton moe up {(f1/1e6)/(t_times[0]):.2f} TFLOPs, {(m1/1e3)/t_times[0]:.2f} GB/s")
+    print(f"Triton moe down {(f2/1e6)/(t_times[1]):.2f} TFLOPs, {(m2/1e3)/t_times[1]:.2f} GB/s")
+
+    print(f"AA moe up {(f1/1e6)/(cu_times[0]):.2f} TFLOPs, {(m1/1e3)/cu_times[0]:.2f} GB/s, speed relative to triton {t_times[0]*100/cu_times[0]:.2f}%")
+    print(f"AA moe down {(f2/1e6)/(cu_times[1]):.2f} TFLOPs, {(m2/1e3)/cu_times[1]:.2f} GB/s, speed relative to triton {t_times[1]*100/cu_times[1]:.2f}%")
+    print(f"""Up projection mean relative difference {diffs[0]:.2f},
+Up projection max relative difference {diffs[1]:.2f},
+swiglu max relative difference {diffs[2]:.2f},
+swiglu max relative difference {diffs[3]:.2f},
+down projection max relative difference {diffs[4]:.2f},
+down projection max relative difference {diffs[5]:.2f},""")
+
 # Uniform
     print("benchmarking uniform")
     topk_ids = (torch.arange(top_k*num_tokens)%n_experts).reshape(num_tokens, top_k).to(torch.int32)
