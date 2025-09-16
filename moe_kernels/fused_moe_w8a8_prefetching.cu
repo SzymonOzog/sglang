@@ -7,6 +7,15 @@
 // Not gonna type all that
 using fp8 = __nv_fp8_e4m3;
 
+// like std::array, but aligned
+// goal: generate ld.128 and st.128 instructions while having easy access to elements
+template <typename T, int sz>
+struct __align__(alignof(T) * sz) array_t {
+  T data[sz];
+  using type = T;
+  static constexpr int size = sz;
+};
+
 template <int BM, int BK, int BN, int PF>
 __global__ void fused_moe_w8a8_prefetching_kernel(
         const fp8* __restrict__ x,
@@ -23,6 +32,7 @@ __global__ void fused_moe_w8a8_prefetching_kernel(
         int N
         )
 {
+    using S = array_t<float, 4>;
     const int32_t warpN = (blockIdx.x*blockDim.x+threadIdx.x)/32;
     const int32_t warpM = blockIdx.y*blockDim.y+threadIdx.y;
 
@@ -75,101 +85,106 @@ __global__ void fused_moe_w8a8_prefetching_kernel(
         load_tiles(stage*BK, stage);
     }
 
-    for (int block=0; block < K/block_shape[0]; block += 1)
+    for (int block=0; block < K/block_shape[0]; block += S::size)
     {
         const int scale_cols_x = K/block_shape[1];
         const int scale_rows_w = N/block_shape[1];
         const int scale_cols_w = K/block_shape[0];
 
-        float scale_x[2];
+        S scale_x[2];
         if (token_src[0] < M)
         {
-            scale_x[0] = x_scale[(token_src[0])*scale_cols_x + block];
+            scale_x[0] = reinterpret_cast<const S*>(x_scale + token_src[0]*scale_cols_x + block)[0];
         }
         if (token_src[1] < M)
         {
-            scale_x[1] = x_scale[(token_src[1])*scale_cols_x + block];
+            scale_x[1] = reinterpret_cast<const S*>(x_scale + token_src[1]*scale_cols_x + block)[0];
+            // scale_x[1] = x_scale[(token_src[1])*scale_cols_x + block];
         }
 
-        float scale_w = w_scale[exp_idx * scale_rows_w * scale_cols_w + (w_row/block_shape[1])*scale_cols_w + block];
+        S scale_w = reinterpret_cast<const S*>(w_scale + exp_idx * scale_rows_w * scale_cols_w + (w_row/block_shape[1])*scale_cols_w + block)[0];
 
         int b_off = block * block_shape[0];
-        float acc[4] = {0.f};
-        for(int k = 0; k < block_shape[0]; k += BK)
+        for (int s = 0; s < S::size; s++)
         {
-            asm volatile("mma.sync.aligned.m16n8k32.row.col.f32.e4m3.e4m3.f32 {%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, {%0, %1, %2, %3};"
-                    : "+f"(acc[0]), "+f"(acc[1]), "+f"(acc[2]), "+f"(acc[3])
-                    : "r"(tile_x[compute_stage][0]), "r"(tile_x[compute_stage][1]), "r"(tile_x[compute_stage][2]), "r"(tile_x[compute_stage][3]), "r"(tile_w[compute_stage][0]), "r"(tile_w[compute_stage][1]));
-            if(b_off + k + compute_stage*BK < K)
-                load_tiles(b_off + k + PF*BK, compute_stage);
-            compute_stage = (compute_stage+1)%PF;
+            float acc[4] = {0.f};
+            for(int k = 0; k < block_shape[0]; k += BK)
+            {
+                asm volatile("mma.sync.aligned.m16n8k32.row.col.f32.e4m3.e4m3.f32 {%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, {%0, %1, %2, %3};"
+                        : "+f"(acc[0]), "+f"(acc[1]), "+f"(acc[2]), "+f"(acc[3])
+                        : "r"(tile_x[compute_stage][0]), "r"(tile_x[compute_stage][1]), "r"(tile_x[compute_stage][2]), "r"(tile_x[compute_stage][3]), "r"(tile_w[compute_stage][0]), "r"(tile_w[compute_stage][1]));
+                if(b_off + k + compute_stage*BK < K)
+                    load_tiles(b_off + k + PF*BK, compute_stage);
+                compute_stage = (compute_stage+1)%PF;
 
-            // fp8 tmp[4];
-            // for (int i = 0; i<4; i++)
-            // {
-            //     tmp[i] = exp_w[w_row*K + w_col];
-            //     // if(p)
-            //     //     printf("loading w row %d, w col %d, %f, %f \n", w_row, w_col, float(tmp[i]), float(tmp[i]) * scale_w);
-            // }
-            // fp8 tmp2[4];
-            // for (int i = 0; i<4; i++)
-            // {
-            //     const int w_col = (lane_id%4)*4 + i + k + b_off + 16;
-            //     tmp2[i] = exp_w[w_row*K + w_col];
-            // }
-            // tile_w[1] = *reinterpret_cast<uint32_t*>(&tmp2);
+                // fp8 tmp[4];
+                // for (int i = 0; i<4; i++)
+                // {
+                //     tmp[i] = exp_w[w_row*K + w_col];
+                //     // if(p)
+                //     //     printf("loading w row %d, w col %d, %f, %f \n", w_row, w_col, float(tmp[i]), float(tmp[i]) * scale_w);
+                // }
+                // fp8 tmp2[4];
+                // for (int i = 0; i<4; i++)
+                // {
+                //     const int w_col = (lane_id%4)*4 + i + k + b_off + 16;
+                //     tmp2[i] = exp_w[w_row*K + w_col];
+                // }
+                // tile_w[1] = *reinterpret_cast<uint32_t*>(&tmp2);
 
-            // float x_dq[8];
-            // float w_dq[8];
-            // for (int i = 0; i < 4; i++)
-            // {
-            //     x_dq[i] = float(reinterpret_cast<fp8*>(&tile_x[0])[i]) * scale_x[0];
-            //     x_dq[4 + i] = float(reinterpret_cast<fp8*>(&tile_x[2])[i]) * scale_x[0];
-            // }
-            // for (int i = 0; i < 4; i++)
-            // {
-            //     w_dq[i] = float(tmp[i]) * scale_w;
-            //     w_dq[i+4] = float(tmp2[i]) * scale_w;
-            // }
-            // if(p)
-            //     printf("M %d, K %d, N %d, mma %d, %d with %f,%f,%f,%f ||| %f, %f, %f, %f , w %f,%f,%f,%f ||| %f, %f, %f, %f acc %f, %f, %f, %f, scale x %f,%f scale_w %f\n",
-            //             M, K, N,
-            //             k,
-            //             token_src[0],
-            //             x_dq[0],
-            //             x_dq[1],
-            //             x_dq[2],
-            //             x_dq[3],
-            //             x_dq[4],
-            //             x_dq[5],
-            //             x_dq[6],
-            //             x_dq[7],
-            //             w_dq[0],
-            //             w_dq[1],
-            //             w_dq[2],
-            //             w_dq[3],
-            //             float(tmp[0]),
-            //             float(tmp[1]),
-            //             float(tmp[2]),
-            //             float(tmp[3]),
-            //             acc[0],
-            //             acc[1],
-            //             acc[2],
-            //             acc[3],
-            //             scale_x[0],
-            //             scale_x[1],
-            //             scale_w
-            //             );
-        }
-        if (token_src[0] < M)
-        {
-            f_acc[0] += scale_x[0] * scale_w * acc[0];
-            f_acc[1] += scale_x[0] * scale_w * acc[1];
-        }
-        if (token_src[1] < M)
-        {
-            f_acc[2] += scale_x[1] * scale_w * acc[2];
-            f_acc[3] += scale_x[1] * scale_w * acc[3];
+                // float x_dq[8];
+                // float w_dq[8];
+                // for (int i = 0; i < 4; i++)
+                // {
+                //     x_dq[i] = float(reinterpret_cast<fp8*>(&tile_x[0])[i]) * scale_x[0];
+                //     x_dq[4 + i] = float(reinterpret_cast<fp8*>(&tile_x[2])[i]) * scale_x[0];
+                // }
+                // for (int i = 0; i < 4; i++)
+                // {
+                //     w_dq[i] = float(tmp[i]) * scale_w;
+                //     w_dq[i+4] = float(tmp2[i]) * scale_w;
+                // }
+                // if(p)
+                //     printf("M %d, K %d, N %d, mma %d, %d with %f,%f,%f,%f ||| %f, %f, %f, %f , w %f,%f,%f,%f ||| %f, %f, %f, %f acc %f, %f, %f, %f, scale x %f,%f scale_w %f\n",
+                //             M, K, N,
+                //             k,
+                //             token_src[0],
+                //             x_dq[0],
+                //             x_dq[1],
+                //             x_dq[2],
+                //             x_dq[3],
+                //             x_dq[4],
+                //             x_dq[5],
+                //             x_dq[6],
+                //             x_dq[7],
+                //             w_dq[0],
+                //             w_dq[1],
+                //             w_dq[2],
+                //             w_dq[3],
+                //             float(tmp[0]),
+                //             float(tmp[1]),
+                //             float(tmp[2]),
+                //             float(tmp[3]),
+                //             acc[0],
+                //             acc[1],
+                //             acc[2],
+                //             acc[3],
+                //             scale_x[0],
+                //             scale_x[1],
+                //             scale_w
+                //             );
+            }
+            b_off += block_shape[0];
+            if (token_src[0] < M)
+            {
+                f_acc[0] += scale_x[0].data[s] * scale_w.data[s] * acc[0];
+                f_acc[1] += scale_x[0].data[s] * scale_w.data[s] * acc[1];
+            }
+            if (token_src[1] < M)
+            {
+                f_acc[2] += scale_x[1].data[s] * scale_w.data[s] * acc[2];
+                f_acc[3] += scale_x[1].data[s] * scale_w.data[s] * acc[3];
+            }
         }
     }
     if (token_src[0] < M)
