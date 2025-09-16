@@ -180,8 +180,9 @@ down projection mean abs difference {diffs[4]:.2f},
 down projection max abs difference {diffs[5]:.2f},""")
     print("")
 
-for num_tokens in [8, 256, 1024, 8192] if len(sys.argv) == 1 else [int(sys.argv[1])]:
-# for num_tokens in [16]:
+profiling = "--profile" in sys.argv
+#TODO proper argument parsing
+for num_tokens in [8, 256, 1024, 8192] if len(sys.argv) == 1 or sys.argv[1] == "--profile" else [int(sys.argv[1])]:
     print("Batch size", num_tokens)
     topk_weights = torch.nn.functional.softmax(torch.randn((num_tokens, top_k), dtype=torch.bfloat16), dim=-1)
 
@@ -191,13 +192,19 @@ for num_tokens in [8, 256, 1024, 8192] if len(sys.argv) == 1 else [int(sys.argv[
 # Ideal
     print("benchmarking ideal")
     topk_ids = torch.arange(top_k).repeat(num_tokens,1).to(torch.int32)
-    bench()
+    if profiling:
+        bench()
+    else:
+        run_moe(topk_ids)
 
 
 # Uniform
     print("benchmarking uniform")
     topk_ids = (torch.arange(top_k*num_tokens)%n_experts).reshape(num_tokens, top_k).to(torch.int32)
-    bench()
+    if profiling:
+        bench()
+    else:
+        run_moe(topk_ids)
 
 # TODO add varying balancedness option
 
