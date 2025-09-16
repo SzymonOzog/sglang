@@ -27,13 +27,13 @@ __global__ void fused_moe_w8a8_kernel(
     const int exp_idx = expert_ids[blockIdx.y];
     const fp8* exp_w = w + exp_idx * K * N;
     const int lane_id = threadIdx.x%32;
-    const int w_col = blockIdx.x * BN + (lane_id>>2);
+    const int w_row = blockIdx.x * BN + (lane_id>>2);
 
     if(blockIdx.y * BM >= num_tokens_post_padded[0])
         return;
 
-    if(exp_idx < 0 || exp_idx >= 257)
-        printf("INVALID IDX %d, %d, %d\n",blockIdx.y, exp_idx, num_tokens_post_padded[0]);
+    // if(exp_idx < 0 || exp_idx >= 257)
+    //     printf("INVALID IDX %d, %d, %d\n",blockIdx.y, exp_idx, num_tokens_post_padded[0]);
 
 
     int token_dest[2];
@@ -51,8 +51,8 @@ __global__ void fused_moe_w8a8_kernel(
     for (int block=0; block < K/block_shape[0]; block += 1)
     {
         const int scale_cols_x = K/block_shape[1];
-        const int scale_cols_w = N/block_shape[1];
-        const int scale_rows_w = K/block_shape[0];
+        const int scale_rows_w = N/block_shape[1];
+        const int scale_cols_w = K/block_shape[0];
 
         float scale_x[2];
         if (token_src[0] < M)
@@ -64,7 +64,7 @@ __global__ void fused_moe_w8a8_kernel(
             scale_x[1] = x_scale[(token_src[1])*scale_cols_x + block];
         }
 
-        float scale_w = w_scale[exp_idx * scale_cols_w * scale_rows_w + (w_col/block_shape[1])*scale_rows_w + block];
+        float scale_w = w_scale[exp_idx * scale_rows_w * scale_cols_w + (w_row/block_shape[1])*scale_cols_w + block];
 
         int b_off = block * block_shape[0];
         float acc[4] = {0.f};
@@ -84,8 +84,8 @@ __global__ void fused_moe_w8a8_kernel(
             fp8 tmp[4];
             for (int i = 0; i<4; i++)
             {
-                const int w_row = (lane_id%4)*4 + i + k + b_off;
-                tmp[i] = exp_w[w_col*K + w_row];
+                const int w_col = (lane_id%4)*4 + i + k + b_off;
+                tmp[i] = exp_w[w_row*K + w_col];
                 // if(p)
                 //     printf("loading w row %d, w col %d, %f, %f \n", w_row, w_col, float(tmp[i]), float(tmp[i]) * scale_w);
             }
@@ -93,26 +93,26 @@ __global__ void fused_moe_w8a8_kernel(
             fp8 tmp2[4];
             for (int i = 0; i<4; i++)
             {
-                const int w_row = (lane_id%4)*4 + i + k + b_off + 16;
-                tmp2[i] = exp_w[w_col*K + w_row];
+                const int w_col = (lane_id%4)*4 + i + k + b_off + 16;
+                tmp2[i] = exp_w[w_row*K + w_col];
             }
             tile_w[1] = *reinterpret_cast<uint32_t*>(&tmp2);
             asm volatile("mma.sync.aligned.m16n8k32.row.col.f32.e4m3.e4m3.f32 {%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, {%0, %1, %2, %3};"
                     : "+f"(acc[0]), "+f"(acc[1]), "+f"(acc[2]), "+f"(acc[3])
                     : "r"(tile_x[0]), "r"(tile_x[1]), "r"(tile_x[2]), "r"(tile_x[3]), "r"(tile_w[0]), "r"(tile_w[1]));
 
-            float x_dq[8];
-            float w_dq[8];
-            for (int i = 0; i < 4; i++)
-            {
-                x_dq[i] = float(reinterpret_cast<fp8*>(&tile_x[0])[i]) * scale_x[0];
-                x_dq[4 + i] = float(reinterpret_cast<fp8*>(&tile_x[2])[i]) * scale_x[0];
-            }
-            for (int i = 0; i < 4; i++)
-            {
-                w_dq[i] = float(tmp[i]) * scale_w;
-                w_dq[i+4] = float(tmp2[i]) * scale_w;
-            }
+            // float x_dq[8];
+            // float w_dq[8];
+            // for (int i = 0; i < 4; i++)
+            // {
+            //     x_dq[i] = float(reinterpret_cast<fp8*>(&tile_x[0])[i]) * scale_x[0];
+            //     x_dq[4 + i] = float(reinterpret_cast<fp8*>(&tile_x[2])[i]) * scale_x[0];
+            // }
+            // for (int i = 0; i < 4; i++)
+            // {
+            //     w_dq[i] = float(tmp[i]) * scale_w;
+            //     w_dq[i+4] = float(tmp2[i]) * scale_w;
+            // }
             // if(p)
             //     printf("M %d, K %d, N %d, mma %d, %d with %f,%f,%f,%f ||| %f, %f, %f, %f , w %f,%f,%f,%f ||| %f, %f, %f, %f acc %f, %f, %f, %f, scale x %f,%f scale_w %f\n",
             //             M, K, N,
@@ -189,7 +189,6 @@ void fused_moe_w8a8(
     constexpr int BN = 8;
     dim3 dimBlock(32,1,1);
     dim3 dimGrid(std::ceil((float)N/BN), std::ceil((float)sorted_num/BM), 1);
-    printf("launching %d, %d \n", dimGrid.x, dimGrid.y);
     fused_moe_w8a8_kernel<BM, BK, BN><<<dimGrid, dimBlock>>>(
             x,
             x_scale,
