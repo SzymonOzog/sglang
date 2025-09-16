@@ -17,7 +17,10 @@ from sgl_kernel import gelu_and_mul, silu_and_mul
 import triton.language as tl
 torch.utils.cpp_extension.COMMON_NVCC_FLAGS = []
 
-my_ext = load(name="my_ext", sources = ["interface.cpp", "fused_moe_w8a8.cu"], extra_cuda_cflags=["-lineinfo"])
+my_ext = load(name="my_ext", sources = ["interface.cpp",
+                                        "fused_moe_w8a8.cu",
+                                        "./moe_kernels/fused_moe_w8a8_regtiling.cu",
+                                        ], extra_cuda_cflags=["-lineinfo"])
 
 def get_stats(activated_experts):
     flops_1 = 2*num_tokens*w1.shape[1]*w1.shape[2]
@@ -40,6 +43,8 @@ def get_times(kernel_name, prof):
         if kernel_name in e.name:
             ret.append(e.device_time_total)
     return ret
+
+KERNEL_VARIANT=0
 
 def run_moe(topk_ids, eps=1e-10):
     x = torch.empty((num_tokens, hidden_size), dtype=torch.bfloat16).normal_(mean=0, std=0.05)
@@ -67,7 +72,7 @@ def run_moe(topk_ids, eps=1e-10):
     moe_sum_reduce_torch_compile(out_triton_down.view(*out_triton_down.shape), out_triton, moe_config.routed_scaling_factor)
 
     sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(topk_ids, 16, n_experts)
-    out = my_ext.fused_moe_w8a8(x_q, x_scale, w1, w1_scale, sorted_token_ids, expert_ids, num_tokens_post_padded, top_k)
+    out = my_ext.fused_moe_w8a8(x_q, x_scale, w1, w1_scale, sorted_token_ids, expert_ids, num_tokens_post_padded, top_k, KERNEL_VARIANT)
 
     # idx = torch.isclose(out, out_triton_up.reshape(out.shape), atol=atol, rtol=rtol).logical_not()
     # if not torch.allclose(out, out_triton_up.reshape(out.shape), atol=atol, rtol=rtol):
@@ -114,7 +119,7 @@ def run_moe(topk_ids, eps=1e-10):
 
     out_custom_swiglu = out_triton_swiglu.clone()
     x_q, x_scale = sglang_per_token_group_quant_fp8(out_custom_swiglu, block_shape[1])
-    out = my_ext.fused_moe_w8a8(x_q, x_scale, w2, w2_scale, sorted_token_ids, expert_ids, num_tokens_post_padded, 1)
+    out = my_ext.fused_moe_w8a8(x_q, x_scale, w2, w2_scale, sorted_token_ids, expert_ids, num_tokens_post_padded, 1, KERNEL_VARIANT)
     out *= topk_weights.view((num_tokens*top_k, 1))
 
     # idx = torch.isclose(out, out_triton_down.reshape(out.shape), atol=atol, rtol=rtol).logical_not()
