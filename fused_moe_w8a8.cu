@@ -155,13 +155,15 @@ __global__ void fused_moe_w8a8_kernel(
     }
     if (token_src[0] < M)
     {
-        out[token_dest[0]*N + warpN * BN + (lane_id%4)*2] = f_acc[0];
-        out[token_dest[0]*N + warpN * BN + (lane_id%4)*2 + 1] = f_acc[1];
+        *reinterpret_cast<__nv_bfloat162*>(out + token_dest[0]*N + warpN * BN + (lane_id%4)*2) = __nv_bfloat162(f_acc[0], f_acc[1]);;
+        // out[token_dest[0]*N + warpN * BN + (lane_id%4)*2] = f_acc[0];
+        // out[token_dest[0]*N + warpN * BN + (lane_id%4)*2 + 1] = f_acc[1];
     }
     if (token_src[1] < M)
     {
-        out[token_dest[1]*N + warpN * BN + (lane_id%4)*2] = f_acc[2];
-        out[token_dest[1]*N + warpN * BN + (lane_id%4)*2 + 1] = f_acc[3];
+        *reinterpret_cast<__nv_bfloat162*>(out + token_dest[1]*N + warpN * BN + (lane_id%4)*2) = __nv_bfloat162(f_acc[2], f_acc[3]);;
+        // out[token_dest[1]*N + warpN * BN + (lane_id%4)*2] = f_acc[2];
+        // out[token_dest[1]*N + warpN * BN + (lane_id%4)*2 + 1] = f_acc[3];
     }
     // if(p)
     //     printf("finished with src %d/%d, dest %d/%d, off %d, exp %d, exp_off %d, %f,%f,%f,%f\n", token_src[0], token_src[1],
