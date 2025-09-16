@@ -148,10 +148,16 @@ __global__ void fused_moe_w8a8_kernel(
             //             scale_w
             //             );
         }
-        f_acc[0] += scale_x[0] * scale_w * acc[0];
-        f_acc[1] += scale_x[0] * scale_w * acc[1];
-        f_acc[2] += scale_x[1] * scale_w * acc[2];
-        f_acc[3] += scale_x[1] * scale_w * acc[3];
+        if (token_src[0] < M)
+        {
+            f_acc[0] += scale_x[0] * scale_w * acc[0];
+            f_acc[1] += scale_x[0] * scale_w * acc[1];
+        }
+        if (token_src[1] < M)
+        {
+            f_acc[2] += scale_x[1] * scale_w * acc[2];
+            f_acc[3] += scale_x[1] * scale_w * acc[3];
+        }
     }
     if (token_src[0] < M)
     {
