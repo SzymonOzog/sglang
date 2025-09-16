@@ -199,9 +199,11 @@ for num_tokens in [8, 256, 1024, 8192] if len(sys.argv) == 1 else [int(sys.argv[
     topk_ids = (torch.arange(top_k*num_tokens)%n_experts).reshape(num_tokens, top_k).to(torch.int32)
     bench()
 
-# Random
-    print("benchmarking random")
-    topk_ids = torch.randint(low=0, size=(num_tokens, top_k), high=n_experts).to(torch.int32)
-    bench()
+# TODO add varying balancedness option
 
-
+# # Random (disabled for now bc its same as uniform)
+#     print("benchmarking random")
+#     topk_ids = torch.randint(low=0, size=(num_tokens, top_k), high=n_experts).to(torch.int32)
+#     bench()
+#
+#
