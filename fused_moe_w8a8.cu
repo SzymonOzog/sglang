@@ -81,25 +81,27 @@ __global__ void fused_moe_w8a8_kernel(
                 tile_x[3] = reinterpret_cast<const uint32_t*>(x + token_src[1]*K + k + b_off + 16)[lane_id%4];
             }
 
-            fp8 tmp[4];
-            for (int i = 0; i<4; i++)
-            {
-                const int w_col = (lane_id%4)*4 + i + k + b_off;
-                tmp[i] = exp_w[w_row*K + w_col];
-                // if(p)
-                //     printf("loading w row %d, w col %d, %f, %f \n", w_row, w_col, float(tmp[i]), float(tmp[i]) * scale_w);
-            }
-            tile_w[0] = *reinterpret_cast<uint32_t*>(&tmp);
-            fp8 tmp2[4];
-            for (int i = 0; i<4; i++)
-            {
-                const int w_col = (lane_id%4)*4 + i + k + b_off + 16;
-                tmp2[i] = exp_w[w_row*K + w_col];
-            }
-            tile_w[1] = *reinterpret_cast<uint32_t*>(&tmp2);
+            const int w_col = (lane_id%4)*4 + k + b_off;
+            tile_w[0] = *reinterpret_cast<const uint32_t*>(exp_w + w_row*K + w_col);
+            tile_w[1] = *reinterpret_cast<const uint32_t*>(exp_w + w_row*K + w_col + 16);
             asm volatile("mma.sync.aligned.m16n8k32.row.col.f32.e4m3.e4m3.f32 {%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, {%0, %1, %2, %3};"
                     : "+f"(acc[0]), "+f"(acc[1]), "+f"(acc[2]), "+f"(acc[3])
                     : "r"(tile_x[0]), "r"(tile_x[1]), "r"(tile_x[2]), "r"(tile_x[3]), "r"(tile_w[0]), "r"(tile_w[1]));
+
+            // fp8 tmp[4];
+            // for (int i = 0; i<4; i++)
+            // {
+            //     tmp[i] = exp_w[w_row*K + w_col];
+            //     // if(p)
+            //     //     printf("loading w row %d, w col %d, %f, %f \n", w_row, w_col, float(tmp[i]), float(tmp[i]) * scale_w);
+            // }
+            // fp8 tmp2[4];
+            // for (int i = 0; i<4; i++)
+            // {
+            //     const int w_col = (lane_id%4)*4 + i + k + b_off + 16;
+            //     tmp2[i] = exp_w[w_row*K + w_col];
+            // }
+            // tile_w[1] = *reinterpret_cast<uint32_t*>(&tmp2);
 
             // float x_dq[8];
             // float w_dq[8];
