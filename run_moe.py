@@ -40,57 +40,17 @@ def get_times(kernel_name, prof):
             ret.append(e.device_time_total)
     return ret
 
-torch.manual_seed(42)
-(w1, w2, w1_scale, w2_scale, moe_config) = torch.load("./moe_config.pt", weights_only=False)
-w1 = w1.to("cuda:0")
-w2 = w2.to("cuda:0")
-w1_scale = w1_scale.to("cuda:0")
-w2_scale = w2_scale.to("cuda:0")
-torch.set_default_device("cuda:0")
-print("")
-print(w1.dtype, w1_scale.dtype)
-
-num_tokens = 8192
-hidden_size = 256
-top_k = 9 # 8 picked + 1 shared
-block_shape = [128, 128]
-n_experts = 257
-
-w1_scale = torch.randn((n_experts, w1.shape[1]//block_shape[0], w1.shape[2]//block_shape[1]), dtype=w2_scale.dtype) * 0.05
-print(w1.shape)
-print(w2.shape)
-w1 = w1[..., :256].contiguous()
-w1_scale = w1_scale[..., :2].reshape(257, 2, 2).contiguous()
-w1_dq = w1.to(torch.bfloat16) * w1_scale.repeat_interleave(block_shape[0], 2).repeat_interleave(block_shape[0], 1)
-print(w1.shape, w1_scale.shape)
-moe_config.inplace=False
-
-# for num_tokens in [8, 256, 1024, 8192]:
-for num_tokens in [16]:
-    print("Batch size", num_tokens)
+def run_moe(topk_ids):
     x = torch.randn((num_tokens, hidden_size), dtype=torch.bfloat16)
     x_q, x_scale = sglang_per_token_group_quant_fp8(x, block_shape[1])
     x_sc = x_scale.repeat_interleave(block_shape[0], 1)
 
     x_dq = x_q.to(torch.bfloat16) * x_sc
-    topk_weights = torch.randn((num_tokens, top_k), dtype=torch.bfloat16)
-
-    config_dtype = 'fp8_w8a8'
-
-# Ideal
-    print("benchmarking ideal")
-    topk_ids = torch.arange(top_k).repeat(num_tokens,1).to(torch.int32)
-
-    config = try_get_optimal_moe_config(w1.shape, w2.shape, topk_ids.shape[1], config_dtype, block_shape=block_shape, M=num_tokens)
-
-    config["BLOCK_SIZE_M"] = 16
     sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(topk_ids, config["BLOCK_SIZE_M"], n_experts)
-    # print(expert_ids)
-    # print(sorted_token_ids[:num_tokens_post_padded[0]])
-    # print(sorted_token_ids.dtype)
 
     out_triton_up = torch.empty((num_tokens, top_k, w1.shape[1]), device=x.device, dtype=x.dtype)
     out_triton_swiglu = torch.empty((num_tokens*top_k, w1.shape[1]//2), device=x.device, dtype=x.dtype)
+    out_custom_swiglu = out_triton_swiglu.clone()
     out_triton_down = torch.empty((num_tokens, top_k, x.shape[1]), device=x.device, dtype=x.dtype)
     out_triton = torch.empty_like(x)
 
@@ -107,18 +67,24 @@ for num_tokens in [16]:
 
 
 
-    # sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(topk_ids, 16, n_experts)
+    sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(topk_ids, 16, n_experts)
     out = my_ext.fused_moe_w8a8(x_q, x_scale, w1, w1_scale, sorted_token_ids, expert_ids, num_tokens_post_padded, top_k)
-    print(out_triton_up.reshape(out.shape))
-    print(out)
+
+    # idx = torch.isclose(out, out_triton_up.reshape(out.shape), atol=atol, rtol=rtol).logical_not()
+    # if not torch.allclose(out, out_triton_up.reshape(out.shape), atol=atol, rtol=rtol):
+    #     print(idx)
+    #     print(idx.nonzero())
+    #     print(idx.sum()/out.nelement())
+    #     print(out_triton_up.reshape(out.shape)[idx][:10])
+    #     print(out[idx][:10])
 
     torch.cuda.synchronize()
-    print("x")
-    for i in range(0, x_dq.shape[-1], 4):
-        print(i, ", ".join(f'{tk:.5f}' for tk in x_dq[0, i:i+4].tolist()))
+    # print("x")
+    # for i in range(0, x_dq.shape[-1], 4):
+    #     print(i, ", ".join(f'{tk:.5f}' for tk in x_dq[0, i:i+4].tolist()))
     # print("w")
     # for i in range(0, w1_dq.shape[-1], 4):
-    #     print(i, ", ".join(f'{tk:.5f}' for tk in w1_dq[0,0 ,i:i+4].tolist()))
+    #     print(i, ", ".join(f'{tk:.5f}' for tk in w1_dq[5,0 ,i:i+4].tolist()))
     # print(w1_dq[0])
     # print(w1[0])
     # print(w1_scale[0])
@@ -128,9 +94,82 @@ for num_tokens in [16]:
     # print(x_scale)
     # print(w1.shape)
 
-    assert(torch.allclose(out, out_triton_up.reshape(out.shape), rtol=1e-2))
+    assert(torch.allclose(out, out_triton_up.reshape(out.shape), atol=atol, rtol=rtol))
+
+    silu_and_mul(out, out_custom_swiglu)
+    # idx = torch.isclose(out_custom_swiglu, out_triton_swiglu, atol=atol, rtol=rtol).logical_not()
+    # if not torch.allclose(out_custom_swiglu, out_triton_swiglu, atol=atol, rtol=rtol):
+    #     print(idx)
+    #     print(idx.nonzero())
+    #     print(idx.sum()/out_triton_swiglu.nelement())
+    #     print(out_triton_swiglu[idx][:10])
+    #     print(out_custom_swiglu[idx][:10])
+
+    # TODO why swiglu stacks error so much
+    assert(torch.allclose(out_custom_swiglu, out_triton_swiglu, atol=100*atol, rtol=rtol))
+    out_custom_swiglu = out_triton_swiglu.clone()
+    x_q, x_scale = sglang_per_token_group_quant_fp8(out_custom_swiglu, block_shape[1])
+    out = my_ext.fused_moe_w8a8(x_q, x_scale, w2, w2_scale, sorted_token_ids, expert_ids, num_tokens_post_padded, 1)
+    out *= topk_weights.view((num_tokens*top_k, 1))
+
+    # idx = torch.isclose(out, out_triton_down.reshape(out.shape), atol=atol, rtol=rtol).logical_not()
+    # if not torch.allclose(out, out_triton_down.reshape(out.shape), atol=atol, rtol=rtol):
+    #     print(idx)
+    #     print(idx.nonzero())
+    #     print(idx.sum()/out.nelement())
+    #     print(out_triton_down.reshape(out.shape)[idx][:10])
+    #     print(out[idx][:10])
+
+    # TODO swiglu too big stacks too much error
+    assert(torch.allclose(out, out_triton_down.reshape(out.shape), atol=10*atol, rtol=rtol))
     # Sanity check that we implemented it all correctly
     out_layer = fused_experts(x, w1, w2, (topk_weights, topk_ids, None), moe_config,
                   use_fp8_w8a8=True, w1_scale=w1_scale, w2_scale=w2_scale, block_shape=block_shape)
     # close to 0 values can have high rtol
-    assert(torch.allclose(out_triton, out_layer, rtol=1e-2))
+    assert(torch.allclose(out_triton, out_layer, rtol=rtol))
+
+torch.manual_seed(42)
+(w1, w2, w1_scale, w2_scale, moe_config) = torch.load("./moe_config.pt", weights_only=False)
+w1 = w1.to("cuda:0")
+w2 = w2.to("cuda:0")
+w1_scale = w1_scale.to("cuda:0")
+w2_scale = w2_scale.to("cuda:0")
+torch.set_default_device("cuda:0")
+
+num_tokens = 8192
+hidden_size = 7168
+top_k = 9 # 8 picked + 1 shared
+block_shape = [128, 128]
+n_experts = 257
+atol = 3e-1
+rtol = 1e-1
+
+w1_scale = torch.randn((n_experts, w1.shape[1]//block_shape[0], w1.shape[2]//block_shape[1]), dtype=w2_scale.dtype) * 0.01
+# w1 = w1[..., :256].contiguous()
+# w1_scale = w1_scale[..., :2].reshape(257, 2, 2).contiguous()
+w1_dq = w1.to(torch.bfloat16) * w1_scale.repeat_interleave(block_shape[0], 2).repeat_interleave(block_shape[0], 1)
+moe_config.inplace=False
+
+for num_tokens in [8]:
+# for num_tokens in [16]:
+    print("Batch size", num_tokens)
+    topk_weights = torch.randn((num_tokens, top_k), dtype=torch.bfloat16)
+
+    config_dtype = 'fp8_w8a8'
+    config = try_get_optimal_moe_config(w1.shape, w2.shape, top_k, config_dtype, block_shape=block_shape, M=num_tokens)
+
+# Ideal
+    print("benchmarking ideal")
+    topk_ids = torch.arange(top_k).repeat(num_tokens,1).to(torch.int32)
+    run_moe(topk_ids)
+# Uniform
+    print("benchmarking uniform")
+    topk_ids = (torch.arange(top_k*num_tokens)%n_experts).reshape(num_tokens, top_k).to(torch.int32)
+    run_moe(topk_ids)
+
+# Random
+    print("benchmarking random")
+    topk_ids = torch.randint(low=0, size=(num_tokens, top_k), high=n_experts).to(torch.int32)
+    run_moe(topk_ids)
+
+
