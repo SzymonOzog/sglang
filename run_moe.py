@@ -1,4 +1,5 @@
 import torch
+import sys
 from torch.profiler import profile, ProfilerActivity, record_function
 from sglang.srt.layers.moe.fused_moe_triton.fused_moe import (
         fused_experts,
@@ -150,7 +151,7 @@ w1_scale = torch.randn((n_experts, w1.shape[1]//block_shape[0], w1.shape[2]//blo
 w1_dq = w1.to(torch.bfloat16) * w1_scale.repeat_interleave(block_shape[0], 2).repeat_interleave(block_shape[0], 1)
 moe_config.inplace=False
 
-for num_tokens in [8]:
+for num_tokens in [8, 256, 1024, 8192] if len(sys.argv) == 1 else [int(sys.argv[1])]:
 # for num_tokens in [16]:
     print("Batch size", num_tokens)
     topk_weights = torch.randn((num_tokens, top_k), dtype=torch.bfloat16)
