@@ -44,7 +44,7 @@ def get_times(kernel_name, prof):
             ret.append(e.device_time_total)
     return ret
 
-KERNEL_VARIANT=0
+KERNEL_VARIANT=1
 
 def run_moe(topk_ids, eps=1e-10):
     x = torch.empty((num_tokens, hidden_size), dtype=torch.bfloat16).normal_(mean=0, std=0.05)
@@ -168,7 +168,7 @@ def bench():
     with profile(activities=[ProfilerActivity.CUDA], record_shapes=True) as prof:
         diffs = run_moe(topk_ids)
     t_times = get_times("fused_moe_kernel", prof)
-    cu_times = get_times("fused_moe_w8a8_kernel", prof)
+    cu_times = get_times("fused_moe_w8a8", prof)
 
     f1,f2, m1,m2 = get_stats(len(set(topk_ids.flatten().tolist())))
     print(f"Triton moe up {(f1/1e6)/(t_times[0]):.2f} TFLOPs, {(m1/1e3)/t_times[0]:.2f} GB/s")

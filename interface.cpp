@@ -35,6 +35,7 @@
             sorted_token_ids.size(0)
 
 void fused_moe_w8a8(MOE_ARGS);
+void fused_moe_w8a8_regtiling(MOE_ARGS);
 
 torch::Tensor fused_moe_launcher(
         torch::Tensor& x,
@@ -50,7 +51,15 @@ torch::Tensor fused_moe_launcher(
 {
     auto options = torch::TensorOptions().dtype(at::ScalarType::BFloat16).device(w.device());
     torch::Tensor out = torch::empty({x.size(0) * top_k, w.size(1)}, options);
-    fused_moe_w8a8(MOE_CALL);
+    switch (kernel_variant)
+    {
+        case 0:
+            fused_moe_w8a8(MOE_CALL);
+            break;
+        case 1:
+            fused_moe_w8a8_regtiling(MOE_CALL);
+            break;
+    }
     return out;
 }
 
