@@ -20,7 +20,6 @@ torch.utils.cpp_extension.COMMON_NVCC_FLAGS = []
 my_ext = load(name="my_ext", sources = ["interface.cpp",
                                         "fused_moe_w8a8.cu",
                                         "./moe_kernels/fused_moe_w8a8_regtiling.cu",
-                                        "./moe_kernels/fused_moe_w8a8_prefetching.cu",
                                         ], extra_cuda_cflags=["-lineinfo"])
 
 def get_stats(activated_experts):
@@ -45,7 +44,7 @@ def get_times(kernel_name, prof):
             ret.append(e.device_time_total)
     return ret
 
-KERNEL_VARIANT=2
+KERNEL_VARIANT=1
 
 def run_moe(topk_ids, eps=1e-10):
     x = torch.empty((num_tokens, hidden_size), dtype=torch.bfloat16).normal_(mean=0, std=0.05)
@@ -74,7 +73,6 @@ def run_moe(topk_ids, eps=1e-10):
 
     sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(topk_ids, 16, n_experts)
     out = my_ext.fused_moe_w8a8(x_q, x_scale, w1, w1_scale, sorted_token_ids, expert_ids, num_tokens_post_padded, top_k, KERNEL_VARIANT)
-    # out = my_ext.fused_moe_w8a8(x_q, x_scale, w1, w1_scale, sorted_token_ids, expert_ids, num_tokens_post_padded, top_k, 0)
 
     # idx = torch.isclose(out, out_triton_up.reshape(out.shape), atol=atol, rtol=rtol).logical_not()
     # if not torch.allclose(out, out_triton_up.reshape(out.shape), atol=atol, rtol=rtol):
@@ -122,7 +120,6 @@ def run_moe(topk_ids, eps=1e-10):
     out_custom_swiglu = out_triton_swiglu.clone()
     x_q, x_scale = sglang_per_token_group_quant_fp8(out_custom_swiglu, block_shape[1])
     out = my_ext.fused_moe_w8a8(x_q, x_scale, w2, w2_scale, sorted_token_ids, expert_ids, num_tokens_post_padded, 1, KERNEL_VARIANT)
-    # out = my_ext.fused_moe_w8a8(x_q, x_scale, w2, w2_scale, sorted_token_ids, expert_ids, num_tokens_post_padded, 1, 0)
     out *= topk_weights.view((num_tokens*top_k, 1))
 
     # idx = torch.isclose(out, out_triton_down.reshape(out.shape), atol=atol, rtol=rtol).logical_not()
@@ -198,12 +195,12 @@ for num_tokens in [8, 256, 1024, 8192] if len(sys.argv) == 1 or sys.argv[1] == "
     config = try_get_optimal_moe_config(w1.shape, w2.shape, top_k, config_dtype, block_shape=block_shape, M=num_tokens)
 
 # Ideal
-    # print("benchmarking ideal")
-    # topk_ids = torch.arange(top_k).repeat(num_tokens,1).to(torch.int32)
-    # if profiling:
-    #     bench()
-    # else:
-    #     run_moe(topk_ids)
+    print("benchmarking ideal")
+    topk_ids = torch.arange(top_k).repeat(num_tokens,1).to(torch.int32)
+    if profiling:
+        bench()
+    else:
+        run_moe(topk_ids)
 
 
 # Uniform
