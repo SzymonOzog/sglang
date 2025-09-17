@@ -20,6 +20,7 @@ torch.utils.cpp_extension.COMMON_NVCC_FLAGS = []
 my_ext = load(name="my_ext", sources = ["interface.cpp",
                                         "fused_moe_w8a8.cu",
                                         "./moe_kernels/fused_moe_w8a8_regtiling.cu",
+                                        "./moe_kernels/fused_moe_w8a8_prefetching.cu",
                                         ], extra_cuda_cflags=["-lineinfo"])
 
 def get_stats(activated_experts):
@@ -44,7 +45,7 @@ def get_times(kernel_name, prof):
             ret.append(e.device_time_total)
     return ret
 
-KERNEL_VARIANT=1
+KERNEL_VARIANT=2
 
 def run_moe(topk_ids, eps=1e-10):
     x = torch.empty((num_tokens, hidden_size), dtype=torch.bfloat16).normal_(mean=0, std=0.05)
@@ -72,6 +73,8 @@ def run_moe(topk_ids, eps=1e-10):
     moe_sum_reduce_torch_compile(out_triton_down.view(*out_triton_down.shape), out_triton, moe_config.routed_scaling_factor)
 
     sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(topk_ids, 16, n_experts)
+    # print(sorted_token_ids[:num_tokens_post_padded[0]])
+    # print(expert_ids)
     out = my_ext.fused_moe_w8a8(x_q, x_scale, w1, w1_scale, sorted_token_ids, expert_ids, num_tokens_post_padded, top_k, KERNEL_VARIANT)
 
     # idx = torch.isclose(out, out_triton_up.reshape(out.shape), atol=atol, rtol=rtol).logical_not()
@@ -187,25 +190,27 @@ down projection max abs difference {diffs[5]:.2f},""")
 
 profiling = "--profile" in sys.argv
 #TODO proper argument parsing
-for num_tokens in [8, 256, 1024, 8192] if len(sys.argv) == 1 or sys.argv[1] == "--profile" else [int(sys.argv[1])]:
+for num_tokens in [8, 32, 128, 256] if len(sys.argv) == 1 or sys.argv[1] == "--profile" else [int(sys.argv[1])]:
     print("Batch size", num_tokens)
     topk_weights = torch.nn.functional.softmax(torch.randn((num_tokens, top_k), dtype=torch.bfloat16), dim=-1)
 
     config_dtype = 'fp8_w8a8'
     config = try_get_optimal_moe_config(w1.shape, w2.shape, top_k, config_dtype, block_shape=block_shape, M=num_tokens)
 
-# Ideal
-    print("benchmarking ideal")
-    topk_ids = torch.arange(top_k).repeat(num_tokens,1).to(torch.int32)
-    if profiling:
-        bench()
-    else:
-        run_moe(topk_ids)
-
+# # Ideal
+#     print("benchmarking ideal")
+#     topk_ids = torch.arange(top_k).repeat(num_tokens,1).to(torch.int32)
+#     if profiling:
+#         bench()
+#     else:
+#         run_moe(topk_ids)
+#
 
 # Uniform
     print("benchmarking uniform")
-    topk_ids = (torch.arange(top_k*num_tokens)%n_experts).reshape(num_tokens, top_k).to(torch.int32)
+    topk_ids = (torch.arange((top_k-1)*num_tokens)%n_experts).reshape(num_tokens, top_k-1).to(torch.int32)
+    # add shared expert to every token
+    topk_ids = torch.hstack((topk_ids, torch.ones(num_tokens).view(num_tokens,1).to(torch.int32)*(n_experts-1)))
     if profiling:
         bench()
     else:
