@@ -19,8 +19,9 @@ torch.utils.cpp_extension.COMMON_NVCC_FLAGS = []
 
 my_ext = load(name="my_ext", sources = ["interface.cpp",
                                         "fused_moe_w8a8.cu",
-                                        "./moe_kernels/fused_moe_w8a8_regtiling.cu",
                                         "./moe_kernels/fused_moe_w8a8_prefetching.cu",
+                                        "./moe_kernels/fused_moe_w8a8_smem.cu",
+                                        # "./moe_kernels/fused_moe_w8a8_regtiling.cu",
                                         ], extra_cuda_cflags=["-lineinfo"])
 
 def get_stats(activated_experts):

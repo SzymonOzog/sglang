@@ -37,6 +37,7 @@
 void fused_moe_w8a8(MOE_ARGS);
 void fused_moe_w8a8_regtiling(MOE_ARGS);
 void fused_moe_w8a8_prefetching(MOE_ARGS);
+void fused_moe_w8a8_smem(MOE_ARGS);
 
 torch::Tensor fused_moe_launcher(
         torch::Tensor& x,
@@ -58,10 +59,10 @@ torch::Tensor fused_moe_launcher(
             fused_moe_w8a8(MOE_CALL);
             break;
         case 1:
-            fused_moe_w8a8_regtiling(MOE_CALL);
+            fused_moe_w8a8_prefetching(MOE_CALL);
             break;
         case 2:
-            fused_moe_w8a8_prefetching(MOE_CALL);
+            fused_moe_w8a8_smem(MOE_CALL);
             break;
     }
     return out;
