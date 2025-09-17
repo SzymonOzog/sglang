@@ -218,18 +218,39 @@ void fused_moe_w8a8_prefetching(
     constexpr int num_warps_y = 2;
     dim3 dimBlock(32*num_warps_x, num_warps_y, 1);
     dim3 dimGrid(std::ceil((float)N/(BN*num_warps_x)), std::ceil((float)sorted_num/(BM*num_warps_y)), 1);
-    fused_moe_w8a8_prefetching_kernel<BM, BK, BN, PF><<<dimGrid, dimBlock>>>(
-            x,
-            x_scale,
-            w,
-            w_scale,
-            out,
-            sorted_token_ids,
-            expert_ids,
-            num_tokens_post_padded,
-            top_k,
-            M,
-            K,
-            N
-            );
+    // TODO get some JIT mechanism instead of hard coding
+    if (top_k == 1)
+    {
+        fused_moe_w8a8_prefetching_kernel<BM, BK, BN, 2><<<dimGrid, dimBlock>>>(
+                x,
+                x_scale,
+                w,
+                w_scale,
+                out,
+                sorted_token_ids,
+                expert_ids,
+                num_tokens_post_padded,
+                top_k,
+                M,
+                K,
+                N
+                );
+    }
+    else
+    {
+        fused_moe_w8a8_prefetching_kernel<BM, BK, BN, PF><<<dimGrid, dimBlock>>>(
+                x,
+                x_scale,
+                w,
+                w_scale,
+                out,
+                sorted_token_ids,
+                expert_ids,
+                num_tokens_post_padded,
+                top_k,
+                M,
+                K,
+                N
+                );
+    }
 }
