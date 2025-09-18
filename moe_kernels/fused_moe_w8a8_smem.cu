@@ -80,7 +80,7 @@ __global__ void fused_moe_w8a8_smem_kernel(
     uint32_t tile_w[2];
     float f_acc[4] = {0.f};
     int compute_stage=0;
-    bool p = blockIdx.x == 1 && blockIdx.y == 128 && lane_id == 14;
+    // bool p = blockIdx.x == 1 && blockIdx.y == 128 && lane_id == 14;
     // bool p = blockIdx.x == 0 && blockIdx.y == 0 && lane_id == 0;
     auto load_tiles = [&](int off, int stage)
     {
@@ -143,8 +143,6 @@ __global__ void fused_moe_w8a8_smem_kernel(
             if(row < M)
             {
                 int col = b_off + i%(BK*PF);
-                // if(p && block==0)
-                //     printf("loading %d to tile %d %d, i %d\n", r, row, col, i);
                 uint32_t sm = __cvta_generic_to_shared(s_x + i);
                 CP_ASYNC_CG(sm, reinterpret_cast<const float4*>(x + row*K + col), TB);
             }
