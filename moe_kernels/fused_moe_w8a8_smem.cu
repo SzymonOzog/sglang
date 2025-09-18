@@ -139,7 +139,8 @@ __global__ void fused_moe_w8a8_smem_kernel(
                 i += blockDim.x*blockDim.y*TO)
         {
             int r = i/(BK*PF);
-            int row = __shfl_sync(0xFFFFFFFF, token_dest[i/(XS/2)]/top_k, (r*4));
+            int tok_dst =  i/(XS/2) == 0 ? token_dest[0] : token_dest[1];
+            int row = __shfl_sync(0xFFFFFFFF, tok_dst/top_k, (r*4));
             if(row < M)
             {
                 int col = b_off + i%(BK*PF);
