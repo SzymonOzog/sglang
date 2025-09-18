@@ -18,7 +18,13 @@ __device__ __forceinline__ void ld_matrix_x2(uint32_t* tile, uint32_t mat)
             : "=r"(tile[0]), "=r"(tile[1]) : "r"(mat));
 }
 
-template <int BM, int BK, int BN, int PF>
+__device__ __forceinline__ void ld_matrix_x4(uint32_t* tile, uint32_t mat)
+{
+    asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0, %1, %2, %3}, [%4];"
+            : "=r"(tile[0]), "=r"(tile[1]), "=r"(tile[2]), "=r"(tile[3]) : "r"(mat));
+}
+
+template <int BM, int BK, int BN, int PF, int WM, int WN>
 __global__ void fused_moe_w8a8_smem_kernel(
         const fp8* __restrict__ x,
         const float* __restrict__ x_scale,
@@ -60,40 +66,57 @@ __global__ void fused_moe_w8a8_smem_kernel(
     token_src[1] = sorted_token_ids[warpM*BM + (lane_id>>2) + 8] / top_k;
 
 
+
     //SMEM sizes
     constexpr int WS = PF*BK*BN;
-    constexpr int XS = PF*BK*BN;
+    constexpr int XS = PF*BK*BM;
     // how many bytes we transfer per CP_ASYNC
     constexpr int TB = 16;
     // Thread offset per transfer
     constexpr int TO = TB/sizeof(fp8);
     __shared__ alignas(128) fp8 s_w[WS];
-    // __shared__ alignas(128) fp8 s_x[XS];
+    __shared__ alignas(128) fp8 s_x[XS];
+
+    constexpr int TPR = (BK*PF/16);
+    constexpr int TPW = 32/TPR;
+    constexpr int TPB = WM*WN*TPW;
+    int token_ld[TPB];
+    for(int i = (threadIdx.y*blockDim.x + threadIdx.x)*TO;
+            i < XS;
+            i += blockDim.x*blockDim.y*TO)
+    {
+        token_ld[i/(blockDim.x*blockDim.y*TO)] = sorted_token_ids[warpM*BM + i/(BK*PF)]/top_k;
+    }
 
     uint32_t tile_x[4];
     uint32_t tile_w[2];
     float f_acc[4] = {0.f};
     int compute_stage=0;
-    bool p = blockIdx.x == 0 && blockIdx.y == 0 && threadIdx.x == 32;
+    // bool p = blockIdx.x == 0 && blockIdx.y == 1 && threadIdx.x == 0;
     auto load_tiles = [&](int off, int stage)
     {
-            if (token_src[0] < M)
-            {
-                tile_x[0] = reinterpret_cast<const uint32_t*>(x + token_src[0]*K + off)[lane_id%4];
-                tile_x[2] = reinterpret_cast<const uint32_t*>(x + token_src[0]*K + off + 16)[lane_id%4];
-            }
-            if (token_src[1] < M)
-            {
-                tile_x[1] = reinterpret_cast<const uint32_t*>(x + token_src[1]*K + off)[lane_id%4];
-                tile_x[3] = reinterpret_cast<const uint32_t*>(x + token_src[1]*K + off + 16)[lane_id%4];
-            }
+            // if (token_src[0] < M)
+            // {
+            //     tile_x[0] = reinterpret_cast<const uint32_t*>(x + token_src[0]*K + off)[lane_id%4];
+            //     tile_x[2] = reinterpret_cast<const uint32_t*>(x + token_src[0]*K + off + 16)[lane_id%4];
+            // }
+            // if (token_src[1] < M)
+            // {
+            //     tile_x[1] = reinterpret_cast<const uint32_t*>(x + token_src[1]*K + off)[lane_id%4];
+            //     tile_x[3] = reinterpret_cast<const uint32_t*>(x + token_src[1]*K + off + 16)[lane_id%4];
+            // }
 
-            const int w_row = (lane_id%8);
-            const int w_col = (lane_id/8)*(BK/2) + stage*BK;
+            const int xs_row = (lane_id%16);
+            const int xs_col = (lane_id/16)*(BK/2) + stage*BK;
+            uint32_t sm_x = __cvta_generic_to_shared(s_x + xs_row*PF*BK + xs_col);
             // if(p)
-            //     printf("reading tile %d/%d, stage %d\n", w_row, w_col, stage);
-            uint32_t sm = __cvta_generic_to_shared(s_w + w_row*PF*BK + w_col);
-            ld_matrix_x2(tile_w, sm);
+            //     printf("reading %d tile %d/%d, stage %d\n", token_dest[0], xs_row, xs_col, stage);
+            ld_matrix_x4(tile_x, sm_x);
+
+            const int ws_row = (lane_id%8);
+            const int ws_col = (lane_id/8)*(BK/2) + stage*BK;
+            uint32_t sm_w = __cvta_generic_to_shared(s_w + ws_row*PF*BK + ws_col);
+            ld_matrix_x2(tile_w, sm_w);
     };
     // for(int stage = 0; stage < PF && stage*BK < K; stage++)
     // {
@@ -115,8 +138,22 @@ __global__ void fused_moe_w8a8_smem_kernel(
             int col = b_off + i%(BK*PF);
             uint32_t sm = __cvta_generic_to_shared(s_w + i);
             // if(p)
-            //     printf("loading to tile %d %d, i %d\n", row, col, i);
+            //     printf("loading %d to tile %d %d, i %d\n", exp_idx, row, col, i);
             CP_ASYNC_CG(sm, reinterpret_cast<const float4*>(exp_w + row*K + col), TB);
+        }
+        for(int i = (threadIdx.y*blockDim.x + threadIdx.x)*TO;
+                i < XS;
+                i += blockDim.x*blockDim.y*TO)
+        {
+            int row = token_ld[i/(blockDim.x*blockDim.y*TO)];
+            if(row < M)
+            {
+                int col = b_off + i%(BK*PF);
+                uint32_t sm = __cvta_generic_to_shared(s_x + i);
+                // if(p)
+                //     printf("loading to tile %d %d, i %d\n", row, col, i);
+                CP_ASYNC_CG(sm, reinterpret_cast<const float4*>(x + row*K + col), TB);
+            }
         }
         CP_ASYNC_COMMIT_GROUP();
         float scale_x[2];
@@ -143,7 +180,7 @@ __global__ void fused_moe_w8a8_smem_kernel(
                     : "r"(tile_x[0]), "r"(tile_x[1]), "r"(tile_x[2]), "r"(tile_x[3]), "r"(tile_w[0]), "r"(tile_w[1]));
             float x_dq[8];
             float w_dq[8];
-            fp8* tmp = reinterpret_cast<fp8*>(&scale_w);
+            fp8* tmp = reinterpret_cast<fp8*>(&tile_w);
             for (int i = 0; i < 4; i++)
             {
                 x_dq[i] = float(reinterpret_cast<fp8*>(&tile_x[0])[i]) * scale_x[0];
@@ -209,6 +246,15 @@ __global__ void fused_moe_w8a8_smem_kernel(
     {
         *reinterpret_cast<__nv_bfloat162*>(out + token_dest[1]*N + warpN * BN + (lane_id%4)*2) = __nv_bfloat162(f_acc[2], f_acc[3]);;
     }
+    // if(p)
+    //     printf("finished with src %d/%d, dest %d/%d, off %d, exp %d, exp_off %d, %f,%f,%f,%f\n", token_src[0], token_src[1],
+    //             token_dest[0], token_dest[1],
+    //             blockIdx.y*BM + (lane_id>>2),
+    //             exp_idx, exp_idx * K * N,
+    //             f_acc[0],
+    //             f_acc[1],
+    //             f_acc[2],
+    //             f_acc[3]);
 }
 
 void fused_moe_w8a8_smem(
@@ -240,39 +286,18 @@ void fused_moe_w8a8_smem(
     // constexpr uint32_t rank = 3;
     // uint64_t size[rank] = {};
 
-    // TODO get some JIT mechanism instead of hard coding
-    if (top_k == 1)
-    {
-        fused_moe_w8a8_smem_kernel<BM, BK, BN, PF><<<dimGrid, dimBlock>>>(
-                x,
-                x_scale,
-                w,
-                w_scale,
-                out,
-                sorted_token_ids,
-                expert_ids,
-                num_tokens_post_padded,
-                top_k,
-                M,
-                K,
-                N
-                );
-    }
-    else
-    {
-        fused_moe_w8a8_smem_kernel<BM, BK, BN, PF><<<dimGrid, dimBlock>>>(
-                x,
-                x_scale,
-                w,
-                w_scale,
-                out,
-                sorted_token_ids,
-                expert_ids,
-                num_tokens_post_padded,
-                top_k,
-                M,
-                K,
-                N
-                );
-    }
+    fused_moe_w8a8_smem_kernel<BM, BK, BN, PF, 1, 1><<<dimGrid, dimBlock>>>(
+            x,
+            x_scale,
+            w,
+            w_scale,
+            out,
+            sorted_token_ids,
+            expert_ids,
+            num_tokens_post_padded,
+            top_k,
+            M,
+            K,
+            N
+            );
 }

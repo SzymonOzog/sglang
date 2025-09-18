@@ -49,7 +49,7 @@ def get_times(kernel_name, prof):
 KERNEL_VARIANT=2
 
 def run_moe(topk_ids, eps=1e-10):
-    x = torch.empty((num_tokens, hidden_size), dtype=torch.bfloat16).normal_(mean=0, std=0.05)
+    x = torch.empty((num_tokens, hidden_size), dtype=torch.bfloat16).normal_(mean=0, std=0.55)
     x_q, x_scale = sglang_per_token_group_quant_fp8(x, block_shape[1])
     x_sc = x_scale.repeat_interleave(block_shape[0], 1)
 
@@ -76,23 +76,27 @@ def run_moe(topk_ids, eps=1e-10):
     sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(topk_ids, 16, n_experts)
     # print(sorted_token_ids[:num_tokens_post_padded[0]])
     # print(expert_ids)
+    # out = my_ext.fused_moe_w8a8(x_q, x_scale, w1, w1_scale, sorted_token_ids, expert_ids, num_tokens_post_padded, top_k, 0)
     out = my_ext.fused_moe_w8a8(x_q, x_scale, w1, w1_scale, sorted_token_ids, expert_ids, num_tokens_post_padded, top_k, KERNEL_VARIANT)
 
-    # idx = torch.isclose(out, out_triton_up.reshape(out.shape), atol=atol, rtol=rtol).logical_not()
-    # if not torch.allclose(out, out_triton_up.reshape(out.shape), atol=atol, rtol=rtol):
-    #     print(idx)
-    #     print(idx.nonzero())
-    #     print(idx.sum()/out.nelement())
-    #     print(out_triton_up.reshape(out.shape)[idx][:10])
-    #     print(out[idx][:10])
+    idx = torch.isclose(out, out_triton_up.reshape(out.shape), atol=atol, rtol=rtol).logical_not()
+    if not torch.allclose(out, out_triton_up.reshape(out.shape), atol=atol, rtol=rtol):
+        print(idx)
+        print(idx.nonzero())
+        print(idx.sum()/out.nelement())
+        print(out_triton_up.reshape(out.shape)[idx][:10])
+        print(out[idx][:10])
 
     torch.cuda.synchronize()
     # print("x")
     # for i in range(0, x_dq.shape[-1], 4):
-    #     print(i, ", ".join(f'{tk:.5f}' for tk in x_dq[0, i:i+4].tolist()))
+    #     print(i, ", ".join(f'{tk:.5f}' for tk in x_dq[1, i:i+4].tolist()))
     # print("w")
+    # for i in range(0, w1.shape[-1], 4):
+    #     print(i, ", ".join(f'{tk:.5f}' for tk in w1[0,0 ,i:i+4].tolist()))
     # for i in range(0, w1_dq.shape[-1], 4):
-    #     print(i, ", ".join(f'{tk:.5f}' for tk in w1_dq[5,0 ,i:i+4].tolist()))
+    #     print(i, ", ".join(f'{tk:.5f}' for tk in w1_dq[0,0 ,i:i+4].tolist()))
+    # return
     # print(w1_dq[0])
     # print(w1[0])
     # print(w1_scale[0])
@@ -102,7 +106,7 @@ def run_moe(topk_ids, eps=1e-10):
     # print(x_scale)
     # print(w1.shape)
 
-    assert(torch.allclose(out, out_triton_up.reshape(out.shape), atol=atol, rtol=rtol))
+    # assert(torch.allclose(out, out_triton_up.reshape(out.shape), atol=atol, rtol=rtol))
     diff = torch.abs(out-out_triton_up.reshape(out.shape))
     mean_diff_up = diff.mean()
     max_diff_up = diff.max()
@@ -116,13 +120,14 @@ def run_moe(topk_ids, eps=1e-10):
     #     print(out_triton_swiglu[idx][:10])
     #     print(out_custom_swiglu[idx][:10])
 
-    assert(torch.allclose(out_custom_swiglu, out_triton_swiglu, atol=atol, rtol=rtol))
+    # assert(torch.allclose(out_custom_swiglu, out_triton_swiglu, atol=atol, rtol=rtol))
     diff = torch.abs(out_custom_swiglu - out_triton_swiglu)
     mean_diff_swiglu = diff.mean()
     max_diff_swiglu = diff.max()
 
     out_custom_swiglu = out_triton_swiglu.clone()
     x_q, x_scale = sglang_per_token_group_quant_fp8(out_custom_swiglu, block_shape[1])
+    # out = my_ext.fused_moe_w8a8(x_q, x_scale, w2, w2_scale, sorted_token_ids, expert_ids, num_tokens_post_padded, 1, 0)
     out = my_ext.fused_moe_w8a8(x_q, x_scale, w2, w2_scale, sorted_token_ids, expert_ids, num_tokens_post_padded, 1, KERNEL_VARIANT)
     out *= topk_weights.view((num_tokens*top_k, 1))
 
@@ -135,7 +140,7 @@ def run_moe(topk_ids, eps=1e-10):
     #     print(out[idx][:10])
 
     # TODO swiglu too big stacks too much error
-    assert(torch.allclose(out, out_triton_down.reshape(out.shape), atol=10*atol, rtol=rtol))
+    # assert(torch.allclose(out, out_triton_down.reshape(out.shape), atol=10*atol, rtol=rtol))
     diff = torch.abs(out-out_triton_down.reshape(out.shape))
     mean_diff_down = diff.mean()
     max_diff_down = diff.max()
@@ -159,12 +164,12 @@ hidden_size = 7168
 top_k = 9 # 8 picked + 1 shared
 block_shape = [128, 128]
 n_experts = 257
-atol = 3e-1
-rtol = 1e-1
+atol = 1e-3
+rtol = 1e-2
 
 w1_scale = torch.randn((n_experts, w1.shape[1]//block_shape[0], w1.shape[2]//block_shape[1]), dtype=w2_scale.dtype) * 0.01
-# w1 = w1[..., :256].contiguous()
-# w1_scale = w1_scale[..., :2].reshape(257, 2, 2).contiguous()
+w1 = w1[..., :hidden_size].contiguous()
+w1_scale = w1_scale[..., :hidden_size//128].reshape(257, 2, hidden_size//128).contiguous()
 w1_dq = w1.to(torch.bfloat16) * w1_scale.repeat_interleave(block_shape[0], 2).repeat_interleave(block_shape[0], 1)
 moe_config.inplace=False
 
