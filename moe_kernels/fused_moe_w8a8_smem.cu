@@ -77,22 +77,11 @@ __global__ void fused_moe_w8a8_smem_kernel(
     __shared__ alignas(128) fp8 s_w[WS];
     __shared__ alignas(128) fp8 s_x[XS];
 
-    constexpr int TPR = (BK*PF/16);
-    constexpr int TPW = 32/TPR;
-    constexpr int TPB = WM*WN*TPW;
-    int token_ld[TPB];
-    for(int i = (threadIdx.y*blockDim.x + threadIdx.x)*TO;
-            i < XS;
-            i += blockDim.x*blockDim.y*TO)
-    {
-        token_ld[i/(blockDim.x*blockDim.y*TO)] = sorted_token_ids[warpM*BM + i/(BK*PF)]/top_k;
-    }
-
     uint32_t tile_x[4];
     uint32_t tile_w[2];
     float f_acc[4] = {0.f};
     int compute_stage=0;
-    // bool p = blockIdx.x == 0 && blockIdx.y == 1 && threadIdx.x == 0;
+    // bool p = blockIdx.x == 0 && blockIdx.y == 64 && threadIdx.x == 0;
     auto load_tiles = [&](int off, int stage)
     {
             // if (token_src[0] < M)
@@ -109,19 +98,15 @@ __global__ void fused_moe_w8a8_smem_kernel(
             const int xs_row = (lane_id%16);
             const int xs_col = (lane_id/16)*(BK/2) + stage*BK;
             uint32_t sm_x = __cvta_generic_to_shared(s_x + xs_row*PF*BK + xs_col);
+            ld_matrix_x4(tile_x, sm_x);
             // if(p)
             //     printf("reading %d tile %d/%d, stage %d\n", token_dest[0], xs_row, xs_col, stage);
-            ld_matrix_x4(tile_x, sm_x);
 
             const int ws_row = (lane_id%8);
             const int ws_col = (lane_id/8)*(BK/2) + stage*BK;
             uint32_t sm_w = __cvta_generic_to_shared(s_w + ws_row*PF*BK + ws_col);
             ld_matrix_x2(tile_w, sm_w);
     };
-    // for(int stage = 0; stage < PF && stage*BK < K; stage++)
-    // {
-    //     load_tiles(stage*BK, stage);
-    // }
 
     for (int block=0; block < K/block_shape[0]; block += 1)
     {
@@ -145,13 +130,15 @@ __global__ void fused_moe_w8a8_smem_kernel(
                 i < XS;
                 i += blockDim.x*blockDim.y*TO)
         {
-            int row = token_ld[i/(blockDim.x*blockDim.y*TO)];
+            // int row = token_ld[i/(blockDim.x*blockDim.y*TO)];
+            int r = i/(BK*PF);
+            int row = __shfl_sync(0xFFFFFFFF, token_src[i/(XS/2)], r*4);
+            // if(p)
+            //     printf("loading to tile %d %d, i %d\n", row, col, i);
             if(row < M)
             {
                 int col = b_off + i%(BK*PF);
                 uint32_t sm = __cvta_generic_to_shared(s_x + i);
-                // if(p)
-                //     printf("loading to tile %d %d, i %d\n", row, col, i);
                 CP_ASYNC_CG(sm, reinterpret_cast<const float4*>(x + row*K + col), TB);
             }
         }
@@ -178,19 +165,19 @@ __global__ void fused_moe_w8a8_smem_kernel(
             asm volatile("mma.sync.aligned.m16n8k32.row.col.f32.e4m3.e4m3.f32 {%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, {%0, %1, %2, %3};"
                     : "+f"(acc[0]), "+f"(acc[1]), "+f"(acc[2]), "+f"(acc[3])
                     : "r"(tile_x[0]), "r"(tile_x[1]), "r"(tile_x[2]), "r"(tile_x[3]), "r"(tile_w[0]), "r"(tile_w[1]));
-            float x_dq[8];
-            float w_dq[8];
-            fp8* tmp = reinterpret_cast<fp8*>(&tile_w);
-            for (int i = 0; i < 4; i++)
-            {
-                x_dq[i] = float(reinterpret_cast<fp8*>(&tile_x[0])[i]) * scale_x[0];
-                x_dq[4 + i] = float(reinterpret_cast<fp8*>(&tile_x[2])[i]) * scale_x[0];
-            }
-            for (int i = 0; i < 4; i++)
-            {
-                w_dq[i] = float(tmp[i]) * scale_w;
-                // w_dq[i+4] = float(tmp2[i]) * scale_w;
-            }
+            // float x_dq[8];
+            // float w_dq[8];
+            // fp8* tmp = reinterpret_cast<fp8*>(&tile_w);
+            // for (int i = 0; i < 4; i++)
+            // {
+            //     x_dq[i] = float(reinterpret_cast<fp8*>(&tile_x[0])[i]) * scale_x[0];
+            //     x_dq[4 + i] = float(reinterpret_cast<fp8*>(&tile_x[2])[i]) * scale_x[0];
+            // }
+            // for (int i = 0; i < 4; i++)
+            // {
+            //     w_dq[i] = float(tmp[i]) * scale_w;
+            //     // w_dq[i+4] = float(tmp2[i]) * scale_w;
+            // }
             // if(p)
             //     printf("M %d, K %d, N %d, mma %d, %d with %f,%f,%f,%f ||| %f, %f, %f, %f , w %f,%f,%f,%f ||| %f, %f, %f, %f acc %f, %f, %f, %f, scale x %f,%f scale_w %f\n",
             //             M, K, N,
