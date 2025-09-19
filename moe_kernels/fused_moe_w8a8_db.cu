@@ -255,7 +255,7 @@ void fused_moe_w8a8_db(
     constexpr int BK = 32;
     constexpr int BN = 8;
     constexpr int PF = 4;
-    constexpr int WN = 4;
+    constexpr int WN = 8;
     // TODO this will only work for num_warps_y = 1
     constexpr int WM = 1;
     dim3 dimBlock(32*WN, WM, 1);
