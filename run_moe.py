@@ -21,7 +21,7 @@ my_ext = load(name="my_ext", sources = ["interface.cpp",
                                         "fused_moe_w8a8.cu",
                                         "./moe_kernels/fused_moe_w8a8_prefetching.cu",
                                         "./moe_kernels/fused_moe_w8a8_smem.cu",
-                                        # "./moe_kernels/fused_moe_w8a8_regtiling.cu",
+                                        "./moe_kernels/fused_moe_w8a8_db.cu",
                                         ], extra_cuda_cflags=["-lineinfo"])
 
 def get_stats(activated_experts):
@@ -46,7 +46,7 @@ def get_times(kernel_name, prof):
             ret.append(e.device_time_total)
     return ret
 
-KERNEL_VARIANT=2
+KERNEL_VARIANT=3
 
 def run_moe(topk_ids, eps=1e-10):
     x = torch.empty((num_tokens, hidden_size), dtype=torch.bfloat16).normal_(mean=0, std=0.55)
@@ -74,14 +74,14 @@ def run_moe(topk_ids, eps=1e-10):
     moe_sum_reduce_torch_compile(out_triton_down.view(*out_triton_down.shape), out_triton, moe_config.routed_scaling_factor)
 
     sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(topk_ids, 16, n_experts)
-    # print(sorted_token_ids[:num_tokens_post_padded[0]])
+    # print(sorted_token_ids[128*16:num_tokens_post_padded[0]])
     # print(expert_ids)
     # out = my_ext.fused_moe_w8a8(x_q, x_scale, w1, w1_scale, sorted_token_ids, expert_ids, num_tokens_post_padded, top_k, 0)
     out = my_ext.fused_moe_w8a8(x_q, x_scale, w1, w1_scale, sorted_token_ids, expert_ids, num_tokens_post_padded, top_k, KERNEL_VARIANT)
 
     idx = torch.isclose(out, out_triton_up.reshape(out.shape), atol=atol, rtol=rtol).logical_not()
     if not torch.allclose(out, out_triton_up.reshape(out.shape), atol=atol, rtol=rtol):
-        print(idx)
+        # print(idx)
         print(idx.nonzero())
         print(idx.sum()/out.nelement())
         print(out_triton_up.reshape(out.shape)[idx][:10])
@@ -89,13 +89,13 @@ def run_moe(topk_ids, eps=1e-10):
 
     torch.cuda.synchronize()
     # print("x")
-    # for i in range(0, x_dq.shape[-1], 4):
-    #     print(i, ", ".join(f'{tk:.5f}' for tk in x_dq[1, i:i+4].tolist()))
+    # for i in range(0, 256, 4):
+    #     print(i, ", ".join(f'{tk:.5f}' for tk in x_dq[0, i:i+4].tolist()))
     # print("w")
     # for i in range(0, w1.shape[-1], 4):
     #     print(i, ", ".join(f'{tk:.5f}' for tk in w1[0,0 ,i:i+4].tolist()))
-    # for i in range(0, w1_dq.shape[-1], 4):
-    #     print(i, ", ".join(f'{tk:.5f}' for tk in w1_dq[0,0 ,i:i+4].tolist()))
+    # for i in range(0, 128, 4):
+    #     print(i, ", ".join(f'{tk:.5f}' for tk in w1_dq[256,4 ,i:i+4].tolist()))
     # return
     # print(w1_dq[0])
     # print(w1[0])
@@ -103,7 +103,8 @@ def run_moe(topk_ids, eps=1e-10):
     # print(w1_scale.shape)
     # print(w1.stride())
     # print(out.shape)
-    # print(x_scale)
+    # print(x_scale[0])
+    # return
     # print(w1.shape)
 
     # assert(torch.allclose(out, out_triton_up.reshape(out.shape), atol=atol, rtol=rtol))
@@ -160,6 +161,7 @@ w2_scale = w2_scale.to("cuda:0")
 torch.set_default_device("cuda:0")
 
 num_tokens = 8192
+# hidden_size = 128
 hidden_size = 7168
 top_k = 9 # 8 picked + 1 shared
 block_shape = [128, 128]
