@@ -68,8 +68,6 @@ __global__ void fused_moe_w8a8_db_kernel(
     token_dest[1] = sorted_token_ids[warpM*BM + (lane_id>>2) + 8];
 
     int token_src[2];
-    token_src[0] = token_dest[0]/top_k;
-    token_src[1] = token_dest[1]/top_k;
 
     //SMEM sizes
     constexpr int WS = WN*PF*BK*BN;
@@ -154,6 +152,8 @@ __global__ void fused_moe_w8a8_db_kernel(
         load_stage++;
     };
 
+    token_src[0] = token_dest[0]/top_k;
+    token_src[1] = token_dest[1]/top_k;
     async_load();
 
     for (int block=0; block < n_stages; block += 1)
