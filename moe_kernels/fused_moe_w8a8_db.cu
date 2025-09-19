@@ -82,67 +82,82 @@ __global__ void fused_moe_w8a8_db_kernel(
     float f_acc[4] = {0.f};
     int compute_stage=0;
     int load_stage=0;
+    int n_stages = K/block_shape[0];
+
     // bool p = blockIdx.x == 1 && blockIdx.y == 128 && lane_id == 14;
-    bool p = blockIdx.x == 0 && blockIdx.y == 0 && lane_id == 0;
+    // bool p = blockIdx.x == 0 && blockIdx.y == 0 && lane_id == 0;
+
     auto load_tiles_x = [&](int stage)
     {
-            int xs_row = (lane_id>>2);
-            if (token_dest[0]/top_k < M)
-            {
-                tile_x[0] = reinterpret_cast<const uint32_t*>(s_x + compute_stage*XS + xs_row*PF*BK + stage*BK)[lane_id%4];
-                tile_x[2] = reinterpret_cast<const uint32_t*>(s_x + compute_stage*XS + xs_row*PF*BK + stage*BK + 16)[lane_id%4];
-            }
-            if (token_dest[1]/top_k < M)
-            {
-                xs_row += 8;
-                tile_x[1] = reinterpret_cast<const uint32_t*>(s_x + compute_stage*XS + xs_row*PF*BK + stage*BK)[lane_id%4];
-                tile_x[3] = reinterpret_cast<const uint32_t*>(s_x + compute_stage*XS + xs_row*PF*BK + stage*BK + 16)[lane_id%4];
-            }
+        const int smem_stage = compute_stage%STAGES;
+        int xs_row = (lane_id>>2);
+        if (token_dest[0]/top_k < M)
+        {
+            tile_x[0] = reinterpret_cast<const uint32_t*>(s_x + smem_stage*XS + xs_row*PF*BK + stage*BK)[lane_id%4];
+            tile_x[2] = reinterpret_cast<const uint32_t*>(s_x + smem_stage*XS + xs_row*PF*BK + stage*BK + 16)[lane_id%4];
+        }
+        if (token_dest[1]/top_k < M)
+        {
+            xs_row += 8;
+            tile_x[1] = reinterpret_cast<const uint32_t*>(s_x + smem_stage*XS + xs_row*PF*BK + stage*BK)[lane_id%4];
+            tile_x[3] = reinterpret_cast<const uint32_t*>(s_x + smem_stage*XS + xs_row*PF*BK + stage*BK + 16)[lane_id%4];
+        }
     };
+
     auto load_tiles_w = [&](int stage)
     {
-            const int ws_row = warp_id*BN + (lane_id%8);
-            const int ws_col = (lane_id/8)*(BK/2) + stage*BK;
-            int i = ws_row*PF*BK + ws_col;
+        const int ws_row = warp_id*BN + (lane_id%8);
+        const int ws_col = (lane_id/8)*(BK/2) + stage*BK;
+        const int smem_stage = compute_stage%STAGES;
 
-            int swizzled = i^((i&(S_MASK<<S_BITS))>>S_BITS);
-            uint32_t sm_w = __cvta_generic_to_shared(s_w + compute_stage*WS + swizzled);
-            ld_matrix_x4(tile_w, sm_w);
+        int i = ws_row*PF*BK + ws_col;
+        int swizzled = i^((i&(S_MASK<<S_BITS))>>S_BITS);
+        uint32_t sm_w = __cvta_generic_to_shared(s_w + smem_stage*WS + swizzled);
+        ld_matrix_x4(tile_w, sm_w);
     };
 
-    for(int i = (threadIdx.y*blockDim.x + threadIdx.x)*TO;
-            i < WS;
-            i += blockDim.x*blockDim.y*TO)
-    {
-        int row = blockIdx.x*WN*BN + i/(BK*PF);
-        int col = i%(BK*PF);
-        int swizzled = i^((i&(S_MASK<<S_BITS))>>S_BITS);
-        uint32_t sm = __cvta_generic_to_shared(s_w + swizzled);
-        CP_ASYNC_CG(sm, reinterpret_cast<const float4*>(exp_w + row*K + col), TB);
-    }
 
-    for(int i = (threadIdx.y*blockDim.x + threadIdx.x)*TO;
-            i < XS;
-            i += blockDim.x*blockDim.y*TO)
+    auto async_load = [&]()
     {
-        int r = i/(BK*PF);
-        int tok_dst =  i/(XS/2) == 0 ? token_dest[0] : token_dest[1];
-        int row = __shfl_sync(0xFFFFFFFF, tok_dst/top_k, (r*4));
-        if(row < M)
+        const int off = load_stage * block_shape[0];
+        int smem_stage = load_stage%STAGES;
+        for(int i = (threadIdx.y*blockDim.x + threadIdx.x)*TO;
+                i < WS;
+                i += blockDim.x*blockDim.y*TO)
         {
-            int col = i%(BK*PF);
-            uint32_t sm = __cvta_generic_to_shared(s_x + i);
-            CP_ASYNC_CG(sm, reinterpret_cast<const float4*>(x + row*K + col), TB);
+            int row = blockIdx.x*WN*BN + i/(BK*PF);
+            int col = off + i%(BK*PF);
+            int swizzled = i^((i&(S_MASK<<S_BITS))>>S_BITS);
+            uint32_t sm = __cvta_generic_to_shared(s_w + smem_stage*WS + swizzled);
+            CP_ASYNC_CG(sm, reinterpret_cast<const float4*>(exp_w + row*K + col), TB);
         }
-    }
-    CP_ASYNC_COMMIT_GROUP();
 
-    for (int block=0; block < K/block_shape[0]; block += 1)
+        for(int i = (threadIdx.y*blockDim.x + threadIdx.x)*TO;
+                i < XS;
+                i += blockDim.x*blockDim.y*TO)
+        {
+            int r = i/(BK*PF);
+            int tok_dst = i/(XS/2) == 0 ? token_dest[0] : token_dest[1];
+            int row = __shfl_sync(0xFFFFFFFF, tok_dst/top_k, (r*4));
+            if(row < M)
+            {
+                int col = off + i%(BK*PF);
+                uint32_t sm = __cvta_generic_to_shared(s_x + smem_stage*XS + i);
+                CP_ASYNC_CG(sm, reinterpret_cast<const float4*>(x + row*K + col), TB);
+            }
+        }
+        CP_ASYNC_COMMIT_GROUP();
+        load_stage++;
+    };
+
+    async_load();
+
+    for (int block=0; block < n_stages; block += 1)
     {
+        compute_stage = block;
         const int scale_cols_x = K/block_shape[1];
         const int scale_rows_w = N/block_shape[1];
         const int scale_cols_w = K/block_shape[0];
-        int b_off = block * block_shape[0];
 
         float scale_x[2];
         if (token_dest[0]/top_k < M)
@@ -159,34 +174,9 @@ __global__ void fused_moe_w8a8_db_kernel(
         CP_ASYNC_WAIT_GROUP(0);
         __syncthreads();
 
-        if(block + 1 < K/block_shape[0])
+        if(load_stage < n_stages)
         {
-            load_stage = (load_stage+1)%2;
-            for(int i = (threadIdx.y*blockDim.x + threadIdx.x)*TO;
-                    i < WS;
-                    i += blockDim.x*blockDim.y*TO)
-            {
-                int row = blockIdx.x*WN*BN + i/(BK*PF);
-                int col = b_off + block_shape[0] + i%(BK*PF);
-                int swizzled = i^((i&(S_MASK<<S_BITS))>>S_BITS);
-                uint32_t sm = __cvta_generic_to_shared(s_w + load_stage*WS + swizzled);
-                CP_ASYNC_CG(sm, reinterpret_cast<const float4*>(exp_w + row*K + col), TB);
-            }
-            for(int i = (threadIdx.y*blockDim.x + threadIdx.x)*TO;
-                    i < XS;
-                    i += blockDim.x*blockDim.y*TO)
-            {
-                int r = i/(BK*PF);
-                int tok_dst =  i/(XS/2) == 0 ? token_dest[0] : token_dest[1];
-                int row = __shfl_sync(0xFFFFFFFF, tok_dst/top_k, (r*4));
-                if(row < M)
-                {
-                    int col = b_off + block_shape[0] + i%(BK*PF);
-                    uint32_t sm = __cvta_generic_to_shared(s_x + load_stage*XS + i);
-                    CP_ASYNC_CG(sm, reinterpret_cast<const float4*>(x + row*K + col), TB);
-                }
-            }
-            CP_ASYNC_COMMIT_GROUP();
+            async_load();
         }
 
         float acc[4] = {0.f};
@@ -208,8 +198,6 @@ __global__ void fused_moe_w8a8_db_kernel(
         asm volatile("mma.sync.aligned.m16n8k32.row.col.f32.e4m3.e4m3.f32 {%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, {%0, %1, %2, %3};"
                 : "+f"(acc[0]), "+f"(acc[1]), "+f"(acc[2]), "+f"(acc[3])
                 : "r"(tile_x[0]), "r"(tile_x[1]), "r"(tile_x[2]), "r"(tile_x[3]), "r"(tile_w[2]), "r"(tile_w[3]));
-        __syncthreads();
-        compute_stage = load_stage;
 
         if (token_dest[0]/top_k < M)
         {
@@ -230,6 +218,7 @@ __global__ void fused_moe_w8a8_db_kernel(
     {
         *reinterpret_cast<__nv_bfloat162*>(out + token_dest[1]*N + warpN * BN + (lane_id%4)*2) = __nv_bfloat162(f_acc[2], f_acc[3]);;
     }
+
     // if((token_dest[0] == 8 || token_dest[1] == 8) && (warpN*BN + (lane_id%4)*2) == 20)
     //     printf("finished with src %d/%d, dest %d/%d, off %d, exp %d, exp_off %d, %f,%f,%f,%f, b %d/%d, t %d/%d\n", token_dest[0], token_dest[1],
     //             token_dest[0], token_dest[1],
@@ -240,6 +229,7 @@ __global__ void fused_moe_w8a8_db_kernel(
     //             f_acc[2],
     //             f_acc[3],
     //             blockIdx.x, blockIdx.y, threadIdx.x, threadIdx.y);
+
 }
 
 void fused_moe_w8a8_db(
