@@ -67,6 +67,10 @@ __global__ void fused_moe_w8a8_db_kernel(
     token_dest[0] = sorted_token_ids[warpM*BM + (lane_id>>2)];
     token_dest[1] = sorted_token_ids[warpM*BM + (lane_id>>2) + 8];
 
+    int token_src[2];
+    token_src[0] = token_dest[0]/top_k;
+    token_src[1] = token_dest[1]/top_k;
+
     //SMEM sizes
     constexpr int WS = WN*PF*BK*BN;
     constexpr int XS = PF*BK*BM;
@@ -91,12 +95,12 @@ __global__ void fused_moe_w8a8_db_kernel(
     {
         const int smem_stage = compute_stage%STAGES;
         int xs_row = (lane_id>>2);
-        if (token_dest[0]/top_k < M)
+        if (token_src[0] < M)
         {
             tile_x[0] = reinterpret_cast<const uint32_t*>(s_x + smem_stage*XS + xs_row*PF*BK + stage*BK)[lane_id%4];
             tile_x[2] = reinterpret_cast<const uint32_t*>(s_x + smem_stage*XS + xs_row*PF*BK + stage*BK + 16)[lane_id%4];
         }
-        if (token_dest[1]/top_k < M)
+        if (token_src[1] < M)
         {
             xs_row += 8;
             tile_x[1] = reinterpret_cast<const uint32_t*>(s_x + smem_stage*XS + xs_row*PF*BK + stage*BK)[lane_id%4];
@@ -160,13 +164,13 @@ __global__ void fused_moe_w8a8_db_kernel(
         const int scale_cols_w = K/block_shape[0];
 
         float scale_x[2];
-        if (token_dest[0]/top_k < M)
+        if (token_src[0] < M)
         {
-            scale_x[0] = x_scale[(token_dest[0]/top_k)*scale_cols_x + block];
+            scale_x[0] = x_scale[(token_src[0])*scale_cols_x + block];
         }
-        if (token_dest[1]/top_k < M)
+        if (token_src[1] < M)
         {
-            scale_x[1] = x_scale[(token_dest[1]/top_k)*scale_cols_x + block];
+            scale_x[1] = x_scale[(token_src[1])*scale_cols_x + block];
         }
 
         float scale_w = w_scale[exp_idx * scale_rows_w * scale_cols_w + (w_row/block_shape[1])*scale_cols_w + block];
@@ -199,22 +203,22 @@ __global__ void fused_moe_w8a8_db_kernel(
                 : "+f"(acc[0]), "+f"(acc[1]), "+f"(acc[2]), "+f"(acc[3])
                 : "r"(tile_x[0]), "r"(tile_x[1]), "r"(tile_x[2]), "r"(tile_x[3]), "r"(tile_w[2]), "r"(tile_w[3]));
 
-        if (token_dest[0]/top_k < M)
+        if (token_src[0] < M)
         {
             f_acc[0] += scale_x[0] * scale_w * acc[0];
             f_acc[1] += scale_x[0] * scale_w * acc[1];
         }
-        if (token_dest[1]/top_k < M)
+        if (token_src[1] < M)
         {
             f_acc[2] += scale_x[1] * scale_w * acc[2];
             f_acc[3] += scale_x[1] * scale_w * acc[3];
         }
     }
-    if (token_dest[0]/top_k < M)
+    if (token_src[0] < M)
     {
         *reinterpret_cast<__nv_bfloat162*>(out + token_dest[0]*N + warpN * BN + (lane_id%4)*2) = __nv_bfloat162(f_acc[0], f_acc[1]);;
     }
-    if (token_dest[1]/top_k < M)
+    if (token_src[1] < M)
     {
         *reinterpret_cast<__nv_bfloat162*>(out + token_dest[1]*N + warpN * BN + (lane_id%4)*2) = __nv_bfloat162(f_acc[2], f_acc[3]);;
     }
