@@ -92,18 +92,23 @@ __global__ void fused_moe_w8a8_db_kernel(
     auto load_tiles_x = [&](int stage)
     {
         const int smem_stage = compute_stage%STAGES;
-        int xs_row = (lane_id>>2);
-        if (token_src[0] < M)
-        {
-            tile_x[0] = reinterpret_cast<const uint32_t*>(s_x + smem_stage*XS + xs_row*PF*BK + stage*BK)[lane_id%4];
-            tile_x[2] = reinterpret_cast<const uint32_t*>(s_x + smem_stage*XS + xs_row*PF*BK + stage*BK + 16)[lane_id%4];
-        }
-        if (token_src[1] < M)
-        {
-            xs_row += 8;
-            tile_x[1] = reinterpret_cast<const uint32_t*>(s_x + smem_stage*XS + xs_row*PF*BK + stage*BK)[lane_id%4];
-            tile_x[3] = reinterpret_cast<const uint32_t*>(s_x + smem_stage*XS + xs_row*PF*BK + stage*BK + 16)[lane_id%4];
-        }
+        // if (token_src[0] < M)
+        // {
+        //     tile_x[0] = reinterpret_cast<const uint32_t*>(s_x + smem_stage*XS + xs_row*PF*BK + stage*BK)[lane_id%4];
+        //     tile_x[2] = reinterpret_cast<const uint32_t*>(s_x + smem_stage*XS + xs_row*PF*BK + stage*BK + 16)[lane_id%4];
+        // }
+        // if (token_src[1] < M)
+        // {
+        //     xs_row += 8;
+        //     tile_x[1] = reinterpret_cast<const uint32_t*>(s_x + smem_stage*XS + xs_row*PF*BK + stage*BK)[lane_id%4];
+        //     tile_x[3] = reinterpret_cast<const uint32_t*>(s_x + smem_stage*XS + xs_row*PF*BK + stage*BK + 16)[lane_id%4];
+        // }
+        int xs_row = (lane_id%16);
+        const int xs_col = (lane_id/16)*(BK/2) + stage*BK;
+        int i = xs_row*PF*BK + xs_col;
+        int swizzled = i^((i&(S_MASK<<S_BITS))>>S_BITS);
+        uint32_t sm_x = __cvta_generic_to_shared(s_x + smem_stage*XS + swizzled);
+        ld_matrix_x4(tile_x, sm_x);
     };
 
     auto load_tiles_w = [&](int stage)
@@ -143,8 +148,9 @@ __global__ void fused_moe_w8a8_db_kernel(
             int row = __shfl_sync(0xFFFFFFFF, tok_src, (r*4));
             if(row < M)
             {
+                int swizzled = i^((i&(S_MASK<<S_BITS))>>S_BITS);
                 int col = off + i%(BK*PF);
-                uint32_t sm = __cvta_generic_to_shared(s_x + smem_stage*XS + i);
+                uint32_t sm = __cvta_generic_to_shared(s_x + smem_stage*XS + swizzled);
                 CP_ASYNC_CG(sm, reinterpret_cast<const float4*>(x + row*K + col), TB);
             }
         }
