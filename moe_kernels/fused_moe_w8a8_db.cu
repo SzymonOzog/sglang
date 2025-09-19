@@ -1,4 +1,3 @@
-
 #include <cuda.h>
 #include <cuda_fp8.h>
 #include <stdio.h>
@@ -8,6 +7,9 @@ using fp8 = __nv_fp8_e4m3;
 
 #define CP_ASYNC_CG(dst, src, Bytes) \
     asm volatile("cp.async.cg.shared.global.L2::256B [%0], [%1], %2;\n" ::"r"(dst), "l"(src), "n"(Bytes))
+
+#define CP_ASYNC_CG4(dst, src, Bytes) \
+    asm volatile("cp.async.ca.shared.global.L2::64B [%0], [%1], %2;\n" ::"r"(dst), "l"(src), "n"(Bytes))
 
 #define CP_ASYNC_COMMIT_GROUP() asm volatile("cp.async.commit_group;\n" ::)
 
@@ -55,6 +57,9 @@ __global__ void fused_moe_w8a8_db_kernel(
     const int lane_id = threadIdx.x%32;
     const int warp_id = threadIdx.x/32;
     const int w_row = warpN * BN + (lane_id>>2);
+
+    __shared__ float s_w_scales[STAGES][WN];
+    __shared__ float s_x_scales[STAGES][BM];
 
     if(warpM * BM >= num_tokens_post_padded[0])
         return;
@@ -124,6 +129,9 @@ __global__ void fused_moe_w8a8_db_kernel(
     };
 
 
+    const int scale_cols_x = K/block_shape[1];
+    const int scale_rows_w = N/block_shape[1];
+    const int scale_cols_w = K/block_shape[0];
     auto async_load = [&]()
     {
         const int off = load_stage * block_shape[0];
@@ -154,6 +162,25 @@ __global__ void fused_moe_w8a8_db_kernel(
                 CP_ASYNC_CG(sm, reinterpret_cast<const float4*>(x + row*K + col), TB);
             }
         }
+        if (threadIdx.x%4 == 0 && threadIdx.x < 32)
+        {
+            if (token_src[0] < M)
+            {
+                uint32_t sm = __cvta_generic_to_shared(s_x_scales[smem_stage] + (lane_id>>2));
+                CP_ASYNC_CG4(sm, &x_scale[(token_src[0])*scale_cols_x + load_stage], 4);
+            }
+            if (token_src[1] < M)
+            {
+                uint32_t sm = __cvta_generic_to_shared(s_x_scales[smem_stage] + (lane_id>>2) + 8);
+                CP_ASYNC_CG4(sm, &x_scale[(token_src[1])*scale_cols_x + load_stage], 4);
+            }
+        }
+
+        if(lane_id == 0)
+        {
+            uint32_t sm = __cvta_generic_to_shared(s_w_scales[smem_stage] + warp_id);
+            CP_ASYNC_CG4(sm, &w_scale[exp_idx * scale_rows_w * scale_cols_w + (w_row/block_shape[1])*scale_cols_w + load_stage], 4);
+        }
         CP_ASYNC_COMMIT_GROUP();
         load_stage++;
     };
@@ -165,21 +192,8 @@ __global__ void fused_moe_w8a8_db_kernel(
     for (int block=0; block < n_stages; block += 1)
     {
         compute_stage = block;
-        const int scale_cols_x = K/block_shape[1];
-        const int scale_rows_w = N/block_shape[1];
-        const int scale_cols_w = K/block_shape[0];
 
-        float scale_x[2];
-        if (token_src[0] < M)
-        {
-            scale_x[0] = x_scale[(token_src[0])*scale_cols_x + block];
-        }
-        if (token_src[1] < M)
-        {
-            scale_x[1] = x_scale[(token_src[1])*scale_cols_x + block];
-        }
-
-        float scale_w = w_scale[exp_idx * scale_rows_w * scale_cols_w + (w_row/block_shape[1])*scale_cols_w + block];
+        // float scale_x[2];
 
         CP_ASYNC_WAIT_GROUP(0);
         __syncthreads();
@@ -209,15 +223,17 @@ __global__ void fused_moe_w8a8_db_kernel(
                 : "+f"(acc[0]), "+f"(acc[1]), "+f"(acc[2]), "+f"(acc[3])
                 : "r"(tile_x[0]), "r"(tile_x[1]), "r"(tile_x[2]), "r"(tile_x[3]), "r"(tile_w[2]), "r"(tile_w[3]));
 
+
+        int smem_stage = compute_stage%STAGES;
         if (token_src[0] < M)
         {
-            f_acc[0] += scale_x[0] * scale_w * acc[0];
-            f_acc[1] += scale_x[0] * scale_w * acc[1];
+            f_acc[0] += s_x_scales[smem_stage][(lane_id>>2)] * s_w_scales[smem_stage][warp_id] * acc[0];
+            f_acc[1] += s_x_scales[smem_stage][(lane_id>>2)] * s_w_scales[smem_stage][warp_id] * acc[1];
         }
         if (token_src[1] < M)
         {
-            f_acc[2] += scale_x[1] * scale_w * acc[2];
-            f_acc[3] += scale_x[1] * scale_w * acc[3];
+            f_acc[2] += s_x_scales[smem_stage][(lane_id>>2)+8] * s_w_scales[smem_stage][warp_id] * acc[2];
+            f_acc[3] += s_x_scales[smem_stage][(lane_id>>2)+8] * s_w_scales[smem_stage][warp_id] * acc[3];
         }
     }
     if (token_src[0] < M)
