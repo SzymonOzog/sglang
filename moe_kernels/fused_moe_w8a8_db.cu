@@ -139,8 +139,8 @@ __global__ void fused_moe_w8a8_db_kernel(
                 i += blockDim.x*blockDim.y*TO)
         {
             int r = i/(BK*PF);
-            int tok_dst = i/(XS/2) == 0 ? token_dest[0] : token_dest[1];
-            int row = __shfl_sync(0xFFFFFFFF, tok_dst/top_k, (r*4));
+            int tok_src = i/(XS/2) == 0 ? token_src[0] : token_src[1];
+            int row = __shfl_sync(0xFFFFFFFF, tok_src, (r*4));
             if(row < M)
             {
                 int col = off + i%(BK*PF);
