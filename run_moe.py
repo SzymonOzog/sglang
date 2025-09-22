@@ -16,6 +16,7 @@ from torch.utils.cpp_extension import load
 from sgl_kernel import gelu_and_mul, silu_and_mul
 import triton.language as tl
 torch.utils.cpp_extension.COMMON_NVCC_FLAGS = []
+from triton.testing import do_bench
 
 my_ext = load(name="my_ext", sources = ["interface.cpp",
                                         "fused_moe_w8a8.cu",
@@ -46,7 +47,7 @@ def get_times(kernel_name, prof):
             ret.append(e.device_time_total)
     return ret
 
-KERNEL_VARIANT=3
+KERNEL_VARIANTS=4
 
 def run_moe(topk_ids, eps=1e-10):
     x = torch.empty((num_tokens, hidden_size), dtype=torch.bfloat16).normal_(mean=0, std=0.55)
@@ -63,6 +64,14 @@ def run_moe(topk_ids, eps=1e-10):
     out_triton = torch.empty_like(x)
 
     compute_type = tl.bfloat16 if x.dtype == torch.bfloat16 else tl.float16
+    if profiling:
+        triton_time_up = do_bench(lambda: invoke_fused_moe_kernel(x, w1, None, out_triton_up, None, w1_scale, None, topk_weights, topk_ids,
+                                                                  sorted_token_ids, expert_ids, num_tokens_post_padded,
+                                                                  False, top_k, config, compute_type, True, False, False, False, False, block_shape))
+        silu_and_mul(out_triton_up.view(-1, w1.shape[1]), out_triton_swiglu)
+        triton_time_down = do_bench(lambda: invoke_fused_moe_kernel(out_triton_swiglu, w2, None, out_triton_down, None, w2_scale, None, topk_weights, topk_ids,
+                                                                     sorted_token_ids, expert_ids, num_tokens_post_padded,
+                                                                     False, 1, config, compute_type, True, False, False, False, False, block_shape))
 
     invoke_fused_moe_kernel(x, w1, None, out_triton_up, None, w1_scale, None, topk_weights, topk_ids,
                             sorted_token_ids, expert_ids, num_tokens_post_padded,
@@ -73,84 +82,105 @@ def run_moe(topk_ids, eps=1e-10):
                             True, 1, config, compute_type, True, False, False, False, False, block_shape)
     moe_sum_reduce_torch_compile(out_triton_down.view(*out_triton_down.shape), out_triton, moe_config.routed_scaling_factor)
 
-    sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(topk_ids, 16, n_experts)
-    # print(sorted_token_ids[128*16:num_tokens_post_padded[0]])
-    # print(expert_ids)
-    # out = my_ext.fused_moe_w8a8(x_q, x_scale, w1, w1_scale, sorted_token_ids, expert_ids, num_tokens_post_padded, top_k, 0)
-    out = my_ext.fused_moe_w8a8(x_q, x_scale, w1, w1_scale, sorted_token_ids, expert_ids, num_tokens_post_padded, top_k, KERNEL_VARIANT)
-
-    idx = torch.isclose(out, out_triton_up.reshape(out.shape), atol=atol, rtol=rtol).logical_not()
-    if not torch.allclose(out, out_triton_up.reshape(out.shape), atol=atol, rtol=rtol):
-        # print(idx)
-        print(idx.nonzero())
-        print(idx.sum()/out.nelement())
-        print(out_triton_up.reshape(out.shape)[idx][:10])
-        print(out[idx][:10])
-
-    torch.cuda.synchronize()
-    # print("x")
-    # for i in range(0, 256, 4):
-    #     print(i, ", ".join(f'{tk:.5f}' for tk in x_dq[0, i:i+4].tolist()))
-    # print("w")
-    # for i in range(0, w1.shape[-1], 4):
-    #     print(i, ", ".join(f'{tk:.5f}' for tk in w1[0,0 ,i:i+4].tolist()))
-    # for i in range(0, 128, 4):
-    #     print(i, ", ".join(f'{tk:.5f}' for tk in w1_dq[256,4 ,i:i+4].tolist()))
-    # return
-    # print(w1_dq[0])
-    # print(w1[0])
-    # print(w1_scale[0])
-    # print(w1_scale.shape)
-    # print(w1.stride())
-    # print(out.shape)
-    # print(x_scale[0])
-    # return
-    # print(w1.shape)
-
-    # assert(torch.allclose(out, out_triton_up.reshape(out.shape), atol=atol, rtol=rtol))
-    diff = torch.abs(out-out_triton_up.reshape(out.shape))
-    mean_diff_up = diff.mean()
-    max_diff_up = diff.max()
-
-    silu_and_mul(out, out_custom_swiglu)
-    # idx = torch.isclose(out_custom_swiglu, out_triton_swiglu, atol=atol, rtol=rtol).logical_not()
-    # if not torch.allclose(out_custom_swiglu, out_triton_swiglu, atol=atol, rtol=rtol):
-    #     print(idx)
-    #     print(idx.nonzero())
-    #     print(idx.sum()/out_triton_swiglu.nelement())
-    #     print(out_triton_swiglu[idx][:10])
-    #     print(out_custom_swiglu[idx][:10])
-
-    # assert(torch.allclose(out_custom_swiglu, out_triton_swiglu, atol=atol, rtol=rtol))
-    diff = torch.abs(out_custom_swiglu - out_triton_swiglu)
-    mean_diff_swiglu = diff.mean()
-    max_diff_swiglu = diff.max()
-
-    out_custom_swiglu = out_triton_swiglu.clone()
-    x_q, x_scale = sglang_per_token_group_quant_fp8(out_custom_swiglu, block_shape[1])
-    # out = my_ext.fused_moe_w8a8(x_q, x_scale, w2, w2_scale, sorted_token_ids, expert_ids, num_tokens_post_padded, 1, 0)
-    out = my_ext.fused_moe_w8a8(x_q, x_scale, w2, w2_scale, sorted_token_ids, expert_ids, num_tokens_post_padded, 1, KERNEL_VARIANT)
-    out *= topk_weights.view((num_tokens*top_k, 1))
-
-    # idx = torch.isclose(out, out_triton_down.reshape(out.shape), atol=atol, rtol=rtol).logical_not()
-    # if not torch.allclose(out, out_triton_down.reshape(out.shape), atol=atol, rtol=rtol):
-    #     print(idx)
-    #     print(idx.nonzero())
-    #     print(idx.sum()/out.nelement())
-    #     print(out_triton_down.reshape(out.shape)[idx][:10])
-    #     print(out[idx][:10])
-
-    # TODO swiglu too big stacks too much error
-    # assert(torch.allclose(out, out_triton_down.reshape(out.shape), atol=10*atol, rtol=rtol))
-    diff = torch.abs(out-out_triton_down.reshape(out.shape))
-    mean_diff_down = diff.mean()
-    max_diff_down = diff.max()
     # Sanity check that we implemented it all correctly
     out_layer = fused_experts(x, w1, w2, (topk_weights, topk_ids, None), moe_config,
                   use_fp8_w8a8=True, w1_scale=w1_scale, w2_scale=w2_scale, block_shape=block_shape)
     # close to 0 values can have high rtol
     assert(torch.allclose(out_triton, out_layer, rtol=rtol))
-    return [mean_diff_up, max_diff_up, mean_diff_swiglu, max_diff_swiglu, mean_diff_down, max_diff_down]
+
+    sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(topk_ids, 16, n_experts)
+    # print(sorted_token_ids[128*16:num_tokens_post_padded[0]])
+    # print(expert_ids)
+    # out = my_ext.fused_moe_w8a8(x_q, x_scale, w1, w1_scale, sorted_token_ids, expert_ids, num_tokens_post_padded, top_k, 0)
+    best_configuration_up = ""
+    best_configuration_down = ""
+    best_diff_up = -1
+    best_diff_down = -1
+    best_diff_swiglu = -1
+    best_up_time = float("inf")
+    best_down_time = float("inf")
+    for kernel_variant in range(KERNEL_VARIANTS):
+        configuration = f"{kernel_variant=}"
+        out = my_ext.fused_moe_w8a8(x_q, x_scale, w1, w1_scale, sorted_token_ids, expert_ids, num_tokens_post_padded, top_k, kernel_variant)
+
+        # idx = torch.isclose(out, out_triton_up.reshape(out.shape), atol=atol, rtol=rtol).logical_not()
+        # if not torch.allclose(out, out_triton_up.reshape(out.shape), atol=atol, rtol=rtol):
+        #     # print(idx)
+        #     print(idx.nonzero())
+        #     print(idx.sum()/out.nelement())
+        #     print(out_triton_up.reshape(out.shape)[idx][:10])
+        #     print(out[idx][:10])
+        #
+        # torch.cuda.synchronize()
+        # print("x")
+        # for i in range(0, 256, 4):
+        #     print(i, ", ".join(f'{tk:.5f}' for tk in x_dq[0, i:i+4].tolist()))
+        # print("w")
+        # for i in range(0, w1.shape[-1], 4):
+        #     print(i, ", ".join(f'{tk:.5f}' for tk in w1[0,0 ,i:i+4].tolist()))
+        # for i in range(0, 128, 4):
+        #     print(i, ", ".join(f'{tk:.5f}' for tk in w1_dq[256,4 ,i:i+4].tolist()))
+        # return
+        # print(w1_dq[0])
+        # print(w1[0])
+        # print(w1_scale[0])
+        # print(w1_scale.shape)
+        # print(w1.stride())
+        # print(out.shape)
+        # print(x_scale[0])
+        # return
+        # print(w1.shape)
+
+        # assert(torch.allclose(out, out_triton_up.reshape(out.shape), atol=atol, rtol=rtol))
+        diff = torch.abs(out-out_triton_up.reshape(out.shape))
+        mean_diff_up = diff.mean()
+        max_diff_up = diff.max()
+
+        silu_and_mul(out, out_custom_swiglu)
+        # idx = torch.isclose(out_custom_swiglu, out_triton_swiglu, atol=atol, rtol=rtol).logical_not()
+        # if not torch.allclose(out_custom_swiglu, out_triton_swiglu, atol=atol, rtol=rtol):
+        #     print(idx)
+        #     print(idx.nonzero())
+        #     print(idx.sum()/out_triton_swiglu.nelement())
+        #     print(out_triton_swiglu[idx][:10])
+        #     print(out_custom_swiglu[idx][:10])
+
+        # assert(torch.allclose(out_custom_swiglu, out_triton_swiglu, atol=atol, rtol=rtol))
+        diff = torch.abs(out_custom_swiglu - out_triton_swiglu)
+        mean_diff_swiglu = diff.mean()
+        max_diff_swiglu = diff.max()
+
+        out_custom_swiglu = out_triton_swiglu.clone()
+        s_q, s_scale = sglang_per_token_group_quant_fp8(out_custom_swiglu, block_shape[1])
+        # out = my_ext.fused_moe_w8a8(x_q, x_scale, w2, w2_scale, sorted_token_ids, expert_ids, num_tokens_post_padded, 1, 0)
+        out = my_ext.fused_moe_w8a8(s_q, s_scale, w2, w2_scale, sorted_token_ids, expert_ids, num_tokens_post_padded, 1, kernel_variant)
+        out *= topk_weights.view((num_tokens*top_k, 1))
+
+        # idx = torch.isclose(out, out_triton_down.reshape(out.shape), atol=atol, rtol=rtol).logical_not()
+        # if not torch.allclose(out, out_triton_down.reshape(out.shape), atol=atol, rtol=rtol):
+        #     print(idx)
+        #     print(idx.nonzero())
+        #     print(idx.sum()/out.nelement())
+        #     print(out_triton_down.reshape(out.shape)[idx][:10])
+        #     print(out[idx][:10])
+
+        # TODO swiglu too big stacks too much error
+        # assert(torch.allclose(out, out_triton_down.reshape(out.shape), atol=10*atol, rtol=rtol))
+        diff = torch.abs(out-out_triton_down.reshape(out.shape))
+        mean_diff_down = diff.mean()
+        max_diff_down = diff.max()
+        up_time = do_bench(lambda: my_ext.fused_moe_w8a8(x_q, x_scale, w1, w1_scale, sorted_token_ids, expert_ids, num_tokens_post_padded, top_k, kernel_variant))
+        if up_time < best_up_time:
+            best_up_time = up_time
+            best_diff_up = (mean_diff_up, max_diff_up)
+            best_diff_swiglu = (mean_diff_swiglu, max_diff_swiglu)
+            best_configuration_up = configuration
+        down_time = do_bench(lambda: my_ext.fused_moe_w8a8(s_q, s_scale, w2, w2_scale, sorted_token_ids, expert_ids, num_tokens_post_padded, 1, kernel_variant))
+        if down_time < best_down_time:
+            best_down_time = down_time
+            best_diff_down = (mean_diff_down, max_diff_down)
+            best_configuration_down = configuration
+    return [*best_diff_up, *best_diff_swiglu, *best_diff_down], [best_up_time, best_down_time], [triton_time_up, triton_time_down], best_configuration_up, best_configuration_down
 
 torch.manual_seed(42)
 (w1, w2, w1_scale, w2_scale, moe_config) = torch.load("./moe_config.pt", weights_only=False)
@@ -176,17 +206,16 @@ w1_dq = w1.to(torch.bfloat16) * w1_scale.repeat_interleave(block_shape[0], 2).re
 moe_config.inplace=False
 
 def bench():
-    with profile(activities=[ProfilerActivity.CUDA], record_shapes=True) as prof:
-        diffs = run_moe(topk_ids)
-    t_times = get_times("fused_moe_kernel", prof)
-    cu_times = get_times("fused_moe_w8a8", prof)
+    diffs, cu_times, t_times, configuration_up, configuration_down = run_moe(topk_ids)
+    # t_times = get_times("fused_moe_kernel", prof)
+    # cu_times = get_times("fused_moe_w8a8", prof)
 
     f1,f2, m1,m2 = get_stats(len(set(topk_ids.flatten().tolist())))
-    print(f"Triton moe up {(f1/1e6)/(t_times[0]):.2f} TFLOPs, {(m1/1e3)/t_times[0]:.2f} GB/s")
-    print(f"AA moe up {(f1/1e6)/(cu_times[0]):.2f} TFLOPs, {(m1/1e3)/cu_times[0]:.2f} GB/s, speed relative to triton {t_times[0]*100/cu_times[0]:.2f}%")
+    print(f"Triton moe up {(f1/1e9)/(t_times[0]):.2f} TFLOPs, {(m1/1e6)/t_times[0]:.2f} GB/s")
+    print(f"AA moe up{configuration_up=} {(f1/1e9)/(cu_times[0]):.2f} TFLOPs, {(m1/1e6)/cu_times[0]:.2f} GB/s, speed relative to triton {t_times[0]*100/cu_times[0]:.2f}%")
 
-    print(f"Triton moe down {(f2/1e6)/(t_times[1]):.2f} TFLOPs, {(m2/1e3)/t_times[1]:.2f} GB/s")
-    print(f"AA moe down {(f2/1e6)/(cu_times[1]):.2f} TFLOPs, {(m2/1e3)/cu_times[1]:.2f} GB/s, speed relative to triton {t_times[1]*100/cu_times[1]:.2f}%")
+    print(f"Triton moe down {(f2/1e9)/(t_times[1]):.2f} TFLOPs, {(m2/1e6)/t_times[1]:.2f} GB/s")
+    print(f"AA moe {configuration_down=} down {(f2/1e9)/(cu_times[1]):.2f} TFLOPs, {(m2/1e6)/cu_times[1]:.2f} GB/s, speed relative to triton {t_times[1]*100/cu_times[1]:.2f}%")
 
     print(f"""Up projection mean abs difference {diffs[0]:.2f},
 Up projection max abs difference {diffs[1]:.2f},
@@ -216,6 +245,7 @@ for num_tokens in [8, 32, 128, 256] if len(sys.argv) == 1 or sys.argv[1] == "--p
 
 # Uniform
     print("benchmarking uniform")
+    print(config)
     topk_ids = (torch.arange((top_k-1)*num_tokens)%n_experts).reshape(num_tokens, top_k-1).to(torch.int32)
     # add shared expert to every token
     topk_ids = torch.hstack((topk_ids, torch.ones(num_tokens).view(num_tokens,1).to(torch.int32)*(n_experts-1)))
