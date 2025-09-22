@@ -83,6 +83,16 @@ def run_moe(topk_ids, eps=1e-10):
     out_triton = torch.empty_like(x)
 
     compute_type = tl.bfloat16 if x.dtype == torch.bfloat16 else tl.float16
+    # warmup triton compilation
+    for _ in range(1):
+        triton_time_up = do_bench(lambda: invoke_fused_moe_kernel(x, w1, None, out_triton_up, None, w1_scale, None, topk_weights, topk_ids,
+                                                                  sorted_token_ids, expert_ids, num_tokens_post_padded,
+                                                                  False, top_k, config, compute_type, True, False, False, False, False, block_shape))
+        silu_and_mul(out_triton_up.view(-1, w1.shape[1]), out_triton_swiglu)
+        triton_time_down = do_bench(lambda: invoke_fused_moe_kernel(out_triton_swiglu, w2, None, out_triton_down, None, w2_scale, None, topk_weights, topk_ids,
+                                                                     sorted_token_ids, expert_ids, num_tokens_post_padded,
+                                                                     False, 1, config, compute_type, True, False, False, False, False, block_shape))
+
     if profiling:
         triton_time_up = do_bench(lambda: invoke_fused_moe_kernel(x, w1, None, out_triton_up, None, w1_scale, None, topk_weights, topk_ids,
                                                                   sorted_token_ids, expert_ids, num_tokens_post_padded,
