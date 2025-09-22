@@ -1,5 +1,6 @@
 import torch
 import sys
+import argparse
 from torch.profiler import profile, ProfilerActivity, record_function
 from sglang.srt.layers.moe.fused_moe_triton.fused_moe import (
         fused_experts,
@@ -211,6 +212,27 @@ def run_moe(topk_ids, eps=1e-10):
             best_configuration_down = configuration
     return [*best_diff_up, *best_diff_swiglu, *best_diff_down], [best_up_time, best_down_time], [triton_time_up, triton_time_down], best_configuration_up, best_configuration_down
 
+def parse_arguments():
+    parser = argparse.ArgumentParser(description='MOE Benchmark Script')
+
+    parser.add_argument('--batch-sizes',
+                        type=int,
+                        nargs='+',
+                        default=[8, 32, 128, 256],
+                        help='Batch sizes to benchmark (default: [8, 32, 128, 256])')
+
+    parser.add_argument('--profile',
+                        action='store_true',
+                        help='Enable profiling mode')
+
+    parser.add_argument('--balancedness',
+                        type=float,
+                        nargs='+',
+                        default=[],
+                        help='Balancedness values to test (default: [])')
+
+    return parser.parse_args()
+
 torch.manual_seed(42)
 (w1, w2, w1_scale, w2_scale, moe_config) = torch.load("./moe_config.pt", weights_only=False)
 w1 = w1.to("cuda:0")
@@ -254,33 +276,37 @@ down projection mean abs difference {diffs[4]:.2f},
 down projection max abs difference {diffs[5]:.2f},""")
     print("")
 
-profiling = "--profile" in sys.argv
-#TODO proper argument parsing
-for num_tokens in [8, 32, 128, 256] if len(sys.argv) == 1 or sys.argv[1] == "--profile" else [int(sys.argv[1])]:
-    print("Batch size", num_tokens)
-    config_dtype = 'fp8_w8a8'
-    config = try_get_optimal_moe_config(w1.shape, w2.shape, top_k, config_dtype, block_shape=block_shape, M=num_tokens)
-    print(config)
-    topk_weights = torch.nn.functional.softmax(torch.randn((num_tokens, top_k), dtype=torch.bfloat16), dim=-1)
+if __name__ == "__main__":
+    args = parse_arguments()
 
+    profiling = args.profile
+    batch_sizes = args.batch_sizes
+    balancedness_values = args.balancedness
 
-# Uniform
-    print("benchmarking uniform")
-    topk_ids = (torch.arange((top_k-1)*num_tokens)%n_experts).reshape(num_tokens, top_k-1).to(torch.int32)
-    # add shared expert to every token
-    topk_ids = torch.hstack((topk_ids, torch.ones(num_tokens).view(num_tokens,1).to(torch.int32)*(n_experts-1)))
-    if profiling:
-        bench()
-    else:
-        run_moe(topk_ids)
+    for num_tokens in batch_sizes:
+        print("Batch size", num_tokens)
+        config_dtype = 'fp8_w8a8'
+        config = try_get_optimal_moe_config(w1.shape, w2.shape, top_k, config_dtype, block_shape=block_shape, M=num_tokens)
+        print(config)
+        topk_weights = torch.nn.functional.softmax(torch.randn((num_tokens, top_k), dtype=torch.bfloat16), dim=-1)
 
-    # Varying balancedness
-    for balancedness in [0.8, 0.5, 0.2]:
-        print(f"benchmarking {balancedness=}")
-        topk_ids = generate_topk_ids(n_experts-1, num_tokens, top_k-1)
+        # Uniform
+        print("benchmarking uniform")
+        topk_ids = (torch.arange((top_k-1)*num_tokens)%n_experts).reshape(num_tokens, top_k-1).to(torch.int32)
         # add shared expert to every token
         topk_ids = torch.hstack((topk_ids, torch.ones(num_tokens).view(num_tokens,1).to(torch.int32)*(n_experts-1)))
         if profiling:
             bench()
         else:
             run_moe(topk_ids)
+
+        # Varying balancedness
+        for balancedness in balancedness_values:
+            print(f"benchmarking {balancedness=}")
+            topk_ids = generate_topk_ids(n_experts-1, num_tokens, top_k-1)
+            # add shared expert to every token
+            topk_ids = torch.hstack((topk_ids, torch.ones(num_tokens).view(num_tokens,1).to(torch.int32)*(n_experts-1)))
+            if profiling:
+                bench()
+            else:
+                run_moe(topk_ids)
