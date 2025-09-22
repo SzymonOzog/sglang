@@ -162,6 +162,7 @@ __global__ void fused_moe_w8a8_db_kernel(
                 CP_ASYNC_CG(sm, reinterpret_cast<const float4*>(x + row*K + col), TB);
             }
         }
+        CP_ASYNC_COMMIT_GROUP();
         if (threadIdx.x%4 == 0 && threadIdx.x < 32)
         {
             if (token_src[0] < M)
@@ -195,7 +196,7 @@ __global__ void fused_moe_w8a8_db_kernel(
 
         // float scale_x[2];
 
-        CP_ASYNC_WAIT_GROUP(0);
+        CP_ASYNC_WAIT_GROUP(1);
         __syncthreads();
 
         if(load_stage < n_stages)
@@ -223,6 +224,16 @@ __global__ void fused_moe_w8a8_db_kernel(
                 : "+f"(acc[0]), "+f"(acc[1]), "+f"(acc[2]), "+f"(acc[3])
                 : "r"(tile_x[0]), "r"(tile_x[1]), "r"(tile_x[2]), "r"(tile_x[3]), "r"(tile_w[2]), "r"(tile_w[3]));
 
+        if(load_stage < n_stages)
+        {
+            CP_ASYNC_WAIT_GROUP(2);
+            __syncthreads();
+        }
+        else
+        {
+            CP_ASYNC_WAIT_GROUP(0);
+            __syncthreads();
+        }
 
         int smem_stage = compute_stage%STAGES;
         if (token_src[0] < M)
@@ -277,7 +288,7 @@ void fused_moe_w8a8_db(
     constexpr int BK = 32;
     constexpr int BN = 8;
     constexpr int PF = 4;
-    constexpr int WN = 8;
+    constexpr int WN = 4;
     // TODO this will only work for num_warps_y = 1
     constexpr int WM = 1;
     dim3 dimBlock(32*WN, WM, 1);
