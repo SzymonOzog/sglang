@@ -25,6 +25,25 @@ my_ext = load(name="my_ext", sources = ["interface.cpp",
                                         "./moe_kernels/fused_moe_w8a8_db.cu",
                                         ], extra_cuda_cflags=["-lineinfo"])
 
+def generate_topk_ids(num_experts, num_tokens, top_k, balancedness=1.0):
+    """
+    Generate topk_ids with a given balancedness.
+
+    balancedness:
+        1.0 -> perfectly balanced (uniform)
+        0.0 -> maximally skewed (all tokens go to one expert)
+        in between -> mixture
+    """
+    # interpolate between uniform and skewed distribution
+    uniform = torch.ones(num_experts) / num_experts
+    skewed = torch.zeros(num_experts); skewed[0] = 1.0
+    probs = balancedness * uniform + (1 - balancedness) * skewed
+
+    # sample expert assignments
+    topk_ids = torch.multinomial(probs, num_tokens * top_k, replacement=True)
+    topk_ids = topk_ids.view(num_tokens, top_k)
+    return topk_ids
+
 def get_stats(activated_experts):
     flops_1 = 2*num_tokens*w1.shape[1]*w1.shape[2]
     flops_2 = 2*num_tokens*top_k*w2.shape[1]*w2.shape[2]
@@ -229,23 +248,14 @@ profiling = "--profile" in sys.argv
 #TODO proper argument parsing
 for num_tokens in [8, 32, 128, 256] if len(sys.argv) == 1 or sys.argv[1] == "--profile" else [int(sys.argv[1])]:
     print("Batch size", num_tokens)
-    topk_weights = torch.nn.functional.softmax(torch.randn((num_tokens, top_k), dtype=torch.bfloat16), dim=-1)
-
     config_dtype = 'fp8_w8a8'
     config = try_get_optimal_moe_config(w1.shape, w2.shape, top_k, config_dtype, block_shape=block_shape, M=num_tokens)
+    print(config)
+    topk_weights = torch.nn.functional.softmax(torch.randn((num_tokens, top_k), dtype=torch.bfloat16), dim=-1)
 
-# # Ideal
-#     print("benchmarking ideal")
-#     topk_ids = torch.arange(top_k).repeat(num_tokens,1).to(torch.int32)
-#     if profiling:
-#         bench()
-#     else:
-#         run_moe(topk_ids)
-#
 
 # Uniform
     print("benchmarking uniform")
-    print(config)
     topk_ids = (torch.arange((top_k-1)*num_tokens)%n_experts).reshape(num_tokens, top_k-1).to(torch.int32)
     # add shared expert to every token
     topk_ids = torch.hstack((topk_ids, torch.ones(num_tokens).view(num_tokens,1).to(torch.int32)*(n_experts-1)))
@@ -254,11 +264,13 @@ for num_tokens in [8, 32, 128, 256] if len(sys.argv) == 1 or sys.argv[1] == "--p
     else:
         run_moe(topk_ids)
 
-# TODO add varying balancedness option
-
-# # Random (disabled for now bc its same as uniform)
-#     print("benchmarking random")
-#     topk_ids = torch.randint(low=0, size=(num_tokens, top_k), high=n_experts).to(torch.int32)
-#     bench()
-#
-#
+    # Varying balancedness
+    for balancedness in [0.8, 0.5, 0.2]:
+        print(f"benchmarking {balancedness=}")
+        topk_ids = generate_topk_ids(n_experts-1, num_tokens, top_k-1)
+        # add shared expert to every token
+        topk_ids = torch.hstack((topk_ids, torch.ones(num_tokens).view(num_tokens,1).to(torch.int32)*(n_experts-1)))
+        if profiling:
+            bench()
+        else:
+            run_moe(topk_ids)
