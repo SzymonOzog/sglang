@@ -56,9 +56,9 @@ my_ext = load(name="my_ext", sources = ["./csrc/torch_interface.cpp",
                                         "./csrc/kernels/fused_moe_w8a8/fused_moe_w8a8_wgmma_tma.cu",
                                         "./csrc/kernels/fused_moe_w8a8/fused_moe_w8a8_wgmma_swiglu.cu",
                                         "./csrc/kernels/fused_moe_w8a8/fused_moe_w8a8_wgmma_tma_swiglu.cu",
+                                        "./csrc/kernels/fused_moe_w8a8/fused_mow_w8a8_up_down.cu",
                                         ], extra_cuda_cflags=["-lineinfo"])
 
-exit()
 
 def bench_events(fn, num_warmups: int = 5, num_tests: int = 50,
           high_precision: bool = False):
