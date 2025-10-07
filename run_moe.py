@@ -18,7 +18,6 @@ from sgl_kernel import gelu_and_mul, silu_and_mul
 import triton.language as tl
 from triton.testing import do_bench
 torch.utils.cpp_extension.COMMON_NVCC_FLAGS = []
-import alpha_kernel
 
 def interleave_tensor(tensor):
     """
@@ -43,6 +42,23 @@ def interleave_tensor(tensor):
     return result.contiguous()
 
 KERNEL_VARIANTS=13
+my_ext = load(name="my_ext", sources = ["./csrc/torch_interface.cpp",
+                                        "./csrc/kernels/fused_moe_w8a8/fused_moe_w8a8.cu",
+                                        "./csrc/kernels/fused_moe_w8a8/fused_moe_w8a8_prefetching.cu",
+                                        "./csrc/kernels/fused_moe_w8a8/fused_moe_w8a8_smem.cu",
+                                        "./csrc/kernels/fused_moe_w8a8/fused_moe_w8a8_db.cu",
+                                        "./csrc/kernels/fused_moe_w8a8/fused_moe_w8a8_tb.cu",
+                                        "./csrc/kernels/fused_moe_w8a8/fused_moe_w8a8_mb.cu",
+                                        "./csrc/kernels/fused_moe_w8a8/fused_moe_w8a8_sacc.cu",
+                                        "./csrc/kernels/fused_moe_w8a8/fused_moe_w8a8_pc.cu",
+                                        "./csrc/kernels/fused_moe_w8a8/fused_moe_w8a8_ast.cu",
+                                        "./csrc/kernels/fused_moe_w8a8/fused_moe_w8a8_wgmma.cu",
+                                        "./csrc/kernels/fused_moe_w8a8/fused_moe_w8a8_wgmma_tma.cu",
+                                        "./csrc/kernels/fused_moe_w8a8/fused_moe_w8a8_wgmma_swiglu.cu",
+                                        "./csrc/kernels/fused_moe_w8a8/fused_moe_w8a8_wgmma_tma_swiglu.cu",
+                                        ], extra_cuda_cflags=["-lineinfo"])
+
+exit()
 
 def bench_events(fn, num_warmups: int = 5, num_tests: int = 50,
           high_precision: bool = False):
@@ -194,7 +210,7 @@ def run_moe(topk_ids, eps=1e-10):
 
     # print(sorted_token_ids[128*16:num_tokens_post_padded[0]])
     # print(expert_ids)
-    # out = alpha_kernel.fused_moe_w8a8(x_q, x_scale, w1, w1_scale, sorted_token_ids, expert_ids, num_tokens_post_padded, top_k, 0)
+    # out = my_ext.fused_moe_w8a8(x_q, x_scale, w1, w1_scale, sorted_token_ids, expert_ids, num_tokens_post_padded, top_k, 0)
     best_configuration_up = ""
     best_configuration_down = ""
     best_diff_up = (-1, -1)
@@ -210,7 +226,7 @@ def run_moe(topk_ids, eps=1e-10):
                 continue
             sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(topk_ids, block_m, n_experts)
             configuration = f"{kernel_variant=} {block_m=}"
-            out = alpha_kernel.fused_moe_w8a8(x_q, x_scale, w1_swiglu, w1_scale, sorted_token_ids, expert_ids, num_tokens_post_padded, top_k, kernel_variant, block_m)
+            out = my_ext.fused_moe_w8a8(x_q, x_scale, w1_swiglu, w1_scale, sorted_token_ids, expert_ids, num_tokens_post_padded, top_k, kernel_variant, block_m)
 
             if kernel_variant < 11:
                 idx = torch.isclose(out, out_triton_up.reshape(out.shape), atol=atol, rtol=rtol).logical_not()
@@ -279,8 +295,8 @@ def run_moe(topk_ids, eps=1e-10):
 
             out_custom_swiglu = out_triton_swiglu.clone()
             s_q, s_scale = sglang_per_token_group_quant_fp8(out_custom_swiglu, block_shape[1])
-            # out = alpha_kernel.fused_moe_w8a8(x_q, x_scale, w2, w2_scale, sorted_token_ids, expert_ids, num_tokens_post_padded, 1, 0)
-            out = alpha_kernel.fused_moe_w8a8(s_q, s_scale, w2, w2_scale, sorted_token_ids, expert_ids, num_tokens_post_padded, 1, min(kernel_variant, 10), block_m)
+            # out = my_ext.fused_moe_w8a8(x_q, x_scale, w2, w2_scale, sorted_token_ids, expert_ids, num_tokens_post_padded, 1, 0)
+            out = my_ext.fused_moe_w8a8(s_q, s_scale, w2, w2_scale, sorted_token_ids, expert_ids, num_tokens_post_padded, 1, min(kernel_variant, 10), block_m)
             out *= topk_weights.view((num_tokens*top_k, 1))
 
             # idx = torch.isclose(out, out_triton_down.reshape(out.shape), atol=atol, rtol=rtol).logical_not()
@@ -298,18 +314,18 @@ def run_moe(topk_ids, eps=1e-10):
             max_diff_down = diff.max()
             if profiling:
                 if kernel_variant > 10:
-                    up_time = bench_fn(lambda: alpha_kernel.fused_moe_w8a8(x_q, x_scale, w1, w1_scale, sorted_token_ids, expert_ids, num_tokens_post_padded, top_k, kernel_variant, block_m))
+                    up_time = bench_fn(lambda: my_ext.fused_moe_w8a8(x_q, x_scale, w1, w1_scale, sorted_token_ids, expert_ids, num_tokens_post_padded, top_k, kernel_variant, block_m))
                     if up_time < best_up_time:
                         best_up_time = up_time
                         best_diff_up = (mean_diff_up, max_diff_up)
                         best_diff_swiglu = (mean_diff_swiglu, max_diff_swiglu)
                         best_configuration_up = configuration
-                else:
-                    down_time = bench_fn(lambda: alpha_kernel.fused_moe_w8a8(s_q, s_scale, w2, w2_scale, sorted_token_ids, expert_ids, num_tokens_post_padded, 1, kernel_variant, block_m))
-                    if down_time < best_down_time:
-                        best_down_time = down_time
-                        best_diff_down = (mean_diff_down, max_diff_down)
-                        best_configuration_down = configuration
+                    else:
+                        down_time = bench_fn(lambda: my_ext.fused_moe_w8a8(s_q, s_scale, w2, w2_scale, sorted_token_ids, expert_ids, num_tokens_post_padded, 1, kernel_variant, block_m))
+                        if down_time < best_down_time:
+                            best_down_time = down_time
+                            best_diff_down = (mean_diff_down, max_diff_down)
+                            best_configuration_down = configuration
                 if verbose:
                     print(f"{configuration=}, {up_time=:.2f} us, {down_time=:.2f} us")
     return [*best_diff_up, *best_diff_swiglu, *best_diff_down], [best_up_time, best_down_time], [triton_time_up, triton_time_down], best_configuration_up, best_configuration_down
