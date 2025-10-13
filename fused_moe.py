@@ -216,23 +216,27 @@ def run_moe(topk_ids, eps=1e-10):
     best_diff = (-1, -1)
     best_time = float("inf")
     variants = [variant] if variant else list(range(KERNEL_VARIANTS))
-    for block_m in range(8, 65, 8):
+    # for block_m in range(8, 65, 8):
+    for block_m in range(8, 9, 8):
         if num_tokens < block_m and block_m != 16:
             continue
         sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(topk_ids, block_m, n_experts)
         configuration = f"{block_m=}"
         s_q, s_scale = sglang_per_token_group_quant_fp8(out_custom_swiglu, block_shape[1])
         # out = my_ext.fused_moe_w8a8(x_q, x_scale, w2, w2_scale, sorted_token_ids, expert_ids, num_tokens_post_padded, 1, 0)
-        out = my_ext.fused_moe_w8a8_up_down(x_q, x_scale, w1, w1_scale, w2, w2_scale, sorted_token_ids, expert_ids, num_tokens_post_padded, topk_weights, top_k, 0, block_m)
+        out = my_ext.fused_moe_w8a8_up_down(x_q, x_scale, w1_swiglu, w1_scale, w2, w2_scale, sorted_token_ids, expert_ids, num_tokens_post_padded, topk_weights, top_k, 0, block_m)
         # print(out)
         # out *= topk_weights.view((num_tokens*top_k, 1))
 
-        # idx = torch.isclose(out, out_triton_down.reshape(out.shape), atol=atol, rtol=rtol).logical_not()
-        # if not torch.allclose(out, out_triton_down.reshape(out.shape), atol=atol, rtol=rtol):
-        #     # print(idx.nonzero())
-        #     print(idx.sum()/out.nelement())
-        #     print(out_triton_down.reshape(out.shape)[idx][:10])
-        #     print(out[idx][:10])
+        idx = torch.isclose(out, out_triton.reshape(out.shape), atol=atol, rtol=rtol).logical_not()
+        if not torch.allclose(out, out_triton.reshape(out.shape), atol=atol, rtol=rtol):
+            # print(idx.nonzero())
+            print(idx.sum()/out.nelement())
+            print(out_triton.reshape(out.shape)[idx][:10])
+            print(out[idx][:10])
+            print(out_triton.reshape(out.shape)[:10])
+            print(out[:10])
+            print(out_triton_swiglu[0, :10])
         # return
 
         # TODO swiglu too big stacks too much error
@@ -241,7 +245,7 @@ def run_moe(topk_ids, eps=1e-10):
         mean_diff = diff.mean()
         max_diff = diff.max()
         if profiling:
-            new_time = bench_fn(lambda: my_ext.fused_moe_w8a8_up_down(x_q, x_scale, w1, w1_scale, w2, w2_scale, sorted_token_ids, expert_ids, num_tokens_post_padded, topk_weights, top_k, 0, block_m))
+            new_time = bench_fn(lambda: my_ext.fused_moe_w8a8_up_down(x_q, x_scale, w1_swiglu, w1_scale, w2, w2_scale, sorted_token_ids, expert_ids, num_tokens_post_padded, topk_weights, top_k, 0, block_m))
             if new_time < best_time:
                 best_time = new_time
                 best_diff = (mean_diff, max_diff)
