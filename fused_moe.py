@@ -41,8 +41,8 @@ def interleave_tensor(tensor):
 
     return result.contiguous()
 
-KERNEL_VARIANTS=2
-my_ext = load(name="my_ext", sources = ["./csrc/torch_interface.cpp",
+KERNEL_VARIANTS=4
+my_ext = load(name="my_ext", verbose=False, sources = ["./csrc/torch_interface.cpp",
                                         "./csrc/kernels/fused_moe_w8a8/fused_moe_w8a8.cu",
                                         "./csrc/kernels/fused_moe_w8a8/fused_moe_w8a8_prefetching.cu",
                                         "./csrc/kernels/fused_moe_w8a8/fused_moe_w8a8_smem.cu",
@@ -58,6 +58,8 @@ my_ext = load(name="my_ext", sources = ["./csrc/torch_interface.cpp",
                                         "./csrc/kernels/fused_moe_w8a8/fused_moe_w8a8_wgmma_tma_swiglu.cu",
                                         "./csrc/kernels/fused_moe_w8a8/fused_mow_w8a8_up_down.cu",
                                         "./csrc/kernels/fused_moe_w8a8/fused_moe_w8a8_up_down_ast.cu",
+                                        "./csrc/kernels/fused_moe_w8a8/fused_moe_w8a8_up_down_tma.cu",
+                                        "./csrc/kernels/fused_moe_w8a8/fused_moe_w8a8_up_down_acc.cu",
                                         ], extra_cuda_cflags=["-lineinfo"])
 
 
@@ -154,7 +156,7 @@ def get_times(kernel_name, prof):
 
 
 def run_moe(topk_ids, eps=1e-10):
-    x = torch.empty((num_tokens, hidden_size), dtype=torch.bfloat16).normal_(mean=0, std=0.15)
+    x = torch.empty((num_tokens, hidden_size), dtype=torch.bfloat16).normal_(mean=0, std=0.05)
     x_q, x_scale = sglang_per_token_group_quant_fp8(x, block_shape[1])
     x_sc = x_scale.repeat_interleave(block_shape[0], 1)
 
@@ -177,7 +179,6 @@ def run_moe(topk_ids, eps=1e-10):
                                                                   False, top_k, config, compute_type, True, False, False, False, False, block_shape))
         triton_time_swiglu = bench_fn(lambda: silu_and_mul(out_triton_up.view(-1, w1.shape[1]), out_triton_swiglu),
                                       kernel_name="silu")
-        triton_time_up += triton_time_swiglu
 
         triton_time_quant = bench_fn(lambda: invoke_fused_moe_kernel(out_triton_swiglu, w2, None, out_triton_down, None, w2_scale, None, topk_weights, topk_ids,
                                                                   sorted_token_ids, expert_ids, num_tokens_post_padded,
@@ -193,7 +194,7 @@ def run_moe(topk_ids, eps=1e-10):
         else:
             triton_time_merge = bench_fn(lambda : moe_sum_reduce_triton(out_triton_down.view(*out_triton_down.shape), out_triton, moe_config.routed_scaling_factor),
                                          kernel_name="sum_reduce")
-        triton_time_merge = 0
+        # triton_time_merge = 0
         triton_time = triton_time_merge + triton_time_down + triton_time_up + triton_time_swiglu + triton_time_quant
 
     invoke_fused_moe_kernel(x, w1, None, out_triton_up, None, w1_scale, None, topk_weights, topk_ids,
@@ -218,7 +219,8 @@ def run_moe(topk_ids, eps=1e-10):
     best_diff = (-1, -1)
     best_time = float("inf")
     best_d_max = (-1, -1)
-    variants = [variant] if variant else list(range(KERNEL_VARIANTS))
+    variants = [variant] if variant is not None else list(range(KERNEL_VARIANTS))
+    # for kernel_variant in [1, 3]:
     for kernel_variant in variants:
         for block_m in range(8, 65, 8):
         # for block_m in range(8, 9, 8):
@@ -231,14 +233,18 @@ def run_moe(topk_ids, eps=1e-10):
             s_sc = s_scale.repeat_interleave(block_shape[0], 1)
             s_dq = s_q.to(torch.bfloat16) * s_sc
             # out = my_ext.fused_moe_w8a8(x_q, x_scale, w2, w2_scale, sorted_token_ids, expert_ids, num_tokens_post_padded, 1, 0)
-            out = my_ext.fused_moe_w8a8_up_down(x_q, x_scale, w1_swiglu, w1_scale, w2, w2_scale, sorted_token_ids, expert_ids, num_tokens_post_padded, topk_weights, top_k, kernel_variant, block_m)
-            # print(out)
+            out = my_ext.fused_moe_w8a8_up_down(x_q, x_scale, w1_swiglu, w1_scale, w2, w2_scale, sorted_token_ids, expert_ids, num_tokens_post_padded, topk_weights, top_k, kernel_variant, block_m, moe_config.routed_scaling_factor)
             # out *= topk_weights.view((num_tokens*top_k, 1))
 
             # print(out.shape)
             # print(out_triton_down.shape)
-            # out_triton_down = out_triton_down.reshape(out.shape)
+            # print(out_triton_down[682, :, 4882])
+            if kernel_variant > 2:
+                out_triton_down = out_triton.reshape(out.shape)
             # out_triton_up = out_triton_up.reshape(72, 256)
+            out_triton_down = out_triton_down.reshape(out.shape)
+            # e0 = out.flatten()[0]
+            # print(out_triton_down)
             # idx = torch.isclose(out, out_triton_down, atol=atol, rtol=rtol).logical_not()
             # if not torch.allclose(out, out_triton_down, atol=atol, rtol=rtol):
             #     # print(idx.nonzero())
@@ -248,14 +254,14 @@ def run_moe(topk_ids, eps=1e-10):
             #     row = 2372
             #     # print(out_triton_up[t, 0*32:1*32])
             #     # print(out_triton_up[t, 128+0*32:128+1*32])
-            #     print(s_dq[t, 3*32:4*32])
-            #     print(w2_dq[exp, row, 3*32:4*32])
+            #     # print(s_dq[t, 3*32:4*32])
+            #     # print(w2_dq[exp, row, 3*32:4*32])
             #     # * topk_weights.flatten()[t],
             #     print(idx.sum()/out.nelement())
-            #     print(out_triton_down[idx][:10])
-            #     print(out[idx][:10])
-            #     print(out_triton_down)
-            #     print(out)
+            #     # print(out_triton_down[idx][:10])
+            #     # print(out[idx][:10])
+            #     # print(out_triton_down[682])
+            #     # print(out[682])
             #     diff = torch.abs(out-out_triton_down)
             #     # print(out_triton_down[:10] - out[:10])
             #     print([diff[r].mean().item() for r in range(out.shape[0])])
@@ -288,8 +294,12 @@ def run_moe(topk_ids, eps=1e-10):
             max_diff = diff.max()
             amax = diff.argmax()
             d_max = (out.flatten()[amax], out_triton_down.flatten()[amax])
+            # print(d_max)
+            # print(amax)
             if profiling:
-                new_time = bench_fn(lambda: my_ext.fused_moe_w8a8_up_down(x_q, x_scale, w1_swiglu, w1_scale, w2, w2_scale, sorted_token_ids, expert_ids, num_tokens_post_padded, topk_weights, top_k, kernel_variant, block_m))
+                new_time = bench_fn(lambda: my_ext.fused_moe_w8a8_up_down(x_q, x_scale, w1_swiglu, w1_scale, w2, w2_scale, sorted_token_ids, expert_ids, num_tokens_post_padded, topk_weights, top_k, kernel_variant, block_m, moe_config.routed_scaling_factor))
+                if kernel_variant < 3:
+                    new_time += triton_time_merge
                 if new_time < best_time:
                     best_time = new_time
                     best_diff = (mean_diff, max_diff)
@@ -305,7 +315,7 @@ def parse_arguments():
     parser.add_argument('--batch-sizes',
                         type=int,
                         nargs='+',
-                        default=[8, 32, 128, 256, 512, 1024],
+                        default=[8, 32, 128, 256, 512, 1024, 2048, 4096, 8192],
                         help='Batch sizes to benchmark')
 
     parser.add_argument('--profile',
