@@ -223,90 +223,95 @@ def run_moe(topk_ids, eps=1e-10):
     # for kernel_variant in [1, 3]:
     for kernel_variant in variants:
         for block_m in range(8, 65, 8):
-        # for block_m in range(8, 9, 8):
-            if num_tokens < block_m and block_m != 16:
-                continue
-            sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(topk_ids, block_m, n_experts)
-            configuration = f"{block_m=} {kernel_variant=}"
-            s_q, s_scale = sglang_per_token_group_quant_fp8(out_triton_swiglu, block_shape[1])
+            for bn, wn in [(32, 8), (64, 4)]:
+                for stage in range(1, 5):
+                    if num_tokens < block_m and block_m != 16:
+                        continue
+                    sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(topk_ids, block_m, n_experts)
+                    configuration = f"{block_m=} {kernel_variant=}"
+                    s_q, s_scale = sglang_per_token_group_quant_fp8(out_triton_swiglu, block_shape[1])
 
-            s_sc = s_scale.repeat_interleave(block_shape[0], 1)
-            s_dq = s_q.to(torch.bfloat16) * s_sc
-            # out = my_ext.fused_moe_w8a8(x_q, x_scale, w2, w2_scale, sorted_token_ids, expert_ids, num_tokens_post_padded, 1, 0)
-            out = my_ext.fused_moe_w8a8_up_down(x_q, x_scale, w1_swiglu, w1_scale, w2, w2_scale, sorted_token_ids, expert_ids, num_tokens_post_padded, topk_weights, top_k, kernel_variant, block_m, moe_config.routed_scaling_factor)
-            # out *= topk_weights.view((num_tokens*top_k, 1))
+                    s_sc = s_scale.repeat_interleave(block_shape[0], 1)
+                    s_dq = s_q.to(torch.bfloat16) * s_sc
+                    # out = my_ext.fused_moe_w8a8(x_q, x_scale, w2, w2_scale, sorted_token_ids, expert_ids, num_tokens_post_padded, 1, 0)
+                    out = my_ext.fused_moe_w8a8_up_down(x_q, x_scale, w1_swiglu, w1_scale, w2, w2_scale, sorted_token_ids,
+                                                        expert_ids, num_tokens_post_padded, topk_weights, top_k,
+                                                        kernel_variant, block_m, bn, wn, stage, 128, moe_config.routed_scaling_factor)
+                    # out *= topk_weights.view((num_tokens*top_k, 1))
 
-            # print(out.shape)
-            # print(out_triton_down.shape)
-            # print(out_triton_down[682, :, 4882])
-            if kernel_variant > 2:
-                out_triton_down = out_triton.reshape(out.shape)
-            # out_triton_up = out_triton_up.reshape(72, 256)
-            out_triton_down = out_triton_down.reshape(out.shape)
-            # e0 = out.flatten()[0]
-            # print(out_triton_down)
-            # idx = torch.isclose(out, out_triton_down, atol=atol, rtol=rtol).logical_not()
-            # if not torch.allclose(out, out_triton_down, atol=atol, rtol=rtol):
-            #     # print(idx.nonzero())
-            #
-            #     t = 8
-            #     exp = 256
-            #     row = 2372
-            #     # print(out_triton_up[t, 0*32:1*32])
-            #     # print(out_triton_up[t, 128+0*32:128+1*32])
-            #     # print(s_dq[t, 3*32:4*32])
-            #     # print(w2_dq[exp, row, 3*32:4*32])
-            #     # * topk_weights.flatten()[t],
-            #     print(idx.sum()/out.nelement())
-            #     # print(out_triton_down[idx][:10])
-            #     # print(out[idx][:10])
-            #     # print(out_triton_down[682])
-            #     # print(out[682])
-            #     diff = torch.abs(out-out_triton_down)
-            #     # print(out_triton_down[:10] - out[:10])
-            #     print([diff[r].mean().item() for r in range(out.shape[0])])
-            #     print([diff[r].max().item() for r in range(out.shape[0])])
-            #     # print(diff.shape)
-            #     print(out[t, row])
-            #     print(out_triton_down[t, row])
-            #     # # print(sorted_token_ids[:num_tokens_post_padded[0]])
-            #     p = [torch.dot(s_dq[t, 0*32:1*32], w2_dq[exp, row, 0*32:1*32]) * topk_weights.flatten()[t],
-            #          torch.dot(s_dq[t, 1*32:2*32], w2_dq[exp, row, 1*32:2*32]) * topk_weights.flatten()[t],
-            #          torch.dot(s_dq[t, 2*32:3*32], w2_dq[exp, row, 2*32:3*32]) * topk_weights.flatten()[t],
-            #          torch.dot(s_dq[t, 3*32:4*32], w2_dq[exp, row, 3*32:4*32]) * topk_weights.flatten()[t]]
-            #     p = [i.item() for i in p]
-            #     print(p, sum(p), topk_weights.flatten()[t])
-            #     # print(topk_weights.shape)
-            #     # print(expert_ids)
-            #     # print(out_triton_swiglu[0, :10])
-            #     # print(w2[0, 1, :10])
-            #     # print(w2_dq[0, 1, :10])
-            #     s = 2372//128
-            #     print(w2_scale[256, s-2 : s + 2])
-            #     print(w2_scale[256, s])
-            #     print(w2_scale[256, 19])
-            # return
+                    # print(out.shape)
+                    # print(out_triton_down.shape)
+                    # print(out_triton_down[682, :, 4882])
+                    if kernel_variant > 2:
+                        out_triton_down = out_triton.reshape(out.shape)
+                    # out_triton_up = out_triton_up.reshape(72, 256)
+                    out_triton_down = out_triton_down.reshape(out.shape)
+                    # e0 = out.flatten()[0]
+                    # print(out_triton_down)
+                    # idx = torch.isclose(out, out_triton_down, atol=atol, rtol=rtol).logical_not()
+                    # if not torch.allclose(out, out_triton_down, atol=atol, rtol=rtol):
+                    #     # print(idx.nonzero())
+                    #
+                    #     t = 8
+                    #     exp = 256
+                    #     row = 2372
+                    #     # print(out_triton_up[t, 0*32:1*32])
+                    #     # print(out_triton_up[t, 128+0*32:128+1*32])
+                    #     # print(s_dq[t, 3*32:4*32])
+                    #     # print(w2_dq[exp, row, 3*32:4*32])
+                    #     # * topk_weights.flatten()[t],
+                    #     print(idx.sum()/out.nelement())
+                    #     # print(out_triton_down[idx][:10])
+                    #     # print(out[idx][:10])
+                    #     # print(out_triton_down[682])
+                    #     # print(out[682])
+                    #     diff = torch.abs(out-out_triton_down)
+                    #     # print(out_triton_down[:10] - out[:10])
+                    #     print([diff[r].mean().item() for r in range(out.shape[0])])
+                    #     print([diff[r].max().item() for r in range(out.shape[0])])
+                    #     # print(diff.shape)
+                    #     print(out[t, row])
+                    #     print(out_triton_down[t, row])
+                    #     # # print(sorted_token_ids[:num_tokens_post_padded[0]])
+                    #     p = [torch.dot(s_dq[t, 0*32:1*32], w2_dq[exp, row, 0*32:1*32]) * topk_weights.flatten()[t],
+                    #          torch.dot(s_dq[t, 1*32:2*32], w2_dq[exp, row, 1*32:2*32]) * topk_weights.flatten()[t],
+                    #          torch.dot(s_dq[t, 2*32:3*32], w2_dq[exp, row, 2*32:3*32]) * topk_weights.flatten()[t],
+                    #          torch.dot(s_dq[t, 3*32:4*32], w2_dq[exp, row, 3*32:4*32]) * topk_weights.flatten()[t]]
+                    #     p = [i.item() for i in p]
+                    #     print(p, sum(p), topk_weights.flatten()[t])
+                    #     # print(topk_weights.shape)
+                    #     # print(expert_ids)
+                    #     # print(out_triton_swiglu[0, :10])
+                    #     # print(w2[0, 1, :10])
+                    #     # print(w2_dq[0, 1, :10])
+                    #     s = 2372//128
+                    #     print(w2_scale[256, s-2 : s + 2])
+                    #     print(w2_scale[256, s])
+                    #     print(w2_scale[256, 19])
+                    # return
 
-            # TODO swiglu too big stacks too much error
-            # assert(torch.allclose(out, out_triton_down.reshape(out.shape), atol=10*atol, rtol=rtol))
-            diff = torch.abs(out-out_triton_down.reshape(out.shape))
-            mean_diff = diff.mean()
-            max_diff = diff.max()
-            amax = diff.argmax()
-            d_max = (out.flatten()[amax], out_triton_down.flatten()[amax])
-            # print(d_max)
-            # print(amax)
-            if profiling:
-                new_time = bench_fn(lambda: my_ext.fused_moe_w8a8_up_down(x_q, x_scale, w1_swiglu, w1_scale, w2, w2_scale, sorted_token_ids, expert_ids, num_tokens_post_padded, topk_weights, top_k, kernel_variant, block_m, moe_config.routed_scaling_factor))
-                if kernel_variant < 3:
-                    new_time += triton_time_merge
-                if new_time < best_time:
-                    best_time = new_time
-                    best_diff = (mean_diff, max_diff)
-                    best_configuration = configuration
-                    best_d_max = d_max
-                if verbose:
-                    print(f"{configuration=}, {new_time=:.2f} us, {best_time:.2f} us")
+                    # TODO swiglu too big stacks too much error
+                    # assert(torch.allclose(out, out_triton_down.reshape(out.shape), atol=10*atol, rtol=rtol))
+                    diff = torch.abs(out-out_triton_down.reshape(out.shape))
+                    mean_diff = diff.mean()
+                    max_diff = diff.max()
+                    amax = diff.argmax()
+                    d_max = (out.flatten()[amax], out_triton_down.flatten()[amax])
+                    # print(d_max)
+                    # print(amax)
+                    if profiling:
+                        new_time = bench_fn(lambda: my_ext.fused_moe_w8a8_up_down(x_q, x_scale, w1_swiglu, w1_scale, w2, w2_scale, sorted_token_ids,
+                                                        expert_ids, num_tokens_post_padded, topk_weights, top_k,
+                                                        kernel_variant, block_m, bn, wn, stage, 128, moe_config.routed_scaling_factor))
+                        if kernel_variant < 3:
+                            new_time += triton_time_merge
+                        if new_time < best_time:
+                            best_time = new_time
+                            best_diff = (mean_diff, max_diff)
+                            best_configuration = configuration
+                            best_d_max = d_max
+                        if verbose:
+                            print(f"{configuration=}, {new_time=:.2f} us, {best_time:.2f} us")
     return [*best_diff], [best_time], [triton_time], best_configuration, best_d_max
 
 def parse_arguments():
@@ -393,7 +398,7 @@ if __name__ == "__main__":
         config_dtype = 'fp8_w8a8'
         config = try_get_optimal_moe_config(w1.shape, w2.shape, top_k, config_dtype, block_shape=block_shape, M=num_tokens)
         print(config)
-        topk_weights = torch.nn.functional.softmax(torch.randn((num_tokens, top_k), dtype=torch.bfloat16), dim=-1)
+        topk_weights = torch.nn.functional.softmax(torch.randn((num_tokens, top_k), dtype=torch.float32), dim=-1)
 
         # Uniform
         print("benchmarking uniform")
