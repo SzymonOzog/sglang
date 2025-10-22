@@ -296,7 +296,7 @@ def run_moe(topk_ids, eps=1e-10):
                     mean_diff = diff.mean()
                     max_diff = diff.max()
                     amax = diff.argmax()
-                    d_max = (out.flatten()[amax], out_triton_down.flatten()[amax])
+                    d_max = (out.flatten()[amax].item(), out_triton_down.flatten()[amax].item())
                     # print(d_max)
                     # print(amax)
                     if profiling:
