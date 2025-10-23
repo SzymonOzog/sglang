@@ -42,7 +42,7 @@ def interleave_tensor(tensor):
     return result.contiguous()
 
 KERNEL_VARIANTS=4
-my_ext = load(name="my_ext", verbose=False, sources = ["./csrc/torch_interface.cpp",
+my_ext = load(name="my_ext", verbose=True, sources = ["./csrc/torch_interface.cpp",
                                         "./csrc/kernels/fused_moe_w8a8/fused_moe_w8a8.cu",
                                         "./csrc/kernels/fused_moe_w8a8/fused_moe_w8a8_prefetching.cu",
                                         "./csrc/kernels/fused_moe_w8a8/fused_moe_w8a8_smem.cu",
@@ -94,7 +94,7 @@ def bench_events(fn, num_warmups: int = 5, num_tests: int = 50,
     return total_time*1e3 / num_tests
 
 # Adapted from: https://github.com/deepseek-ai/DeepEP/blob/main/deep_ep/utils.py
-def bench_kineto(fn, kernel_name: str = "moe", num_tests: int = 50):
+def bench_kineto(fn, kernel_name: str = "moe", num_tests: int = 25):
     # Profile
     schedule = torch.profiler.schedule(wait=0, warmup=1, active=1, repeat=1)
     with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CUDA], schedule=schedule) as prof:
@@ -221,14 +221,16 @@ def run_moe(topk_ids, eps=1e-10):
     best_d_max = (-1, -1)
     variants = [variant] if variant is not None else list(range(KERNEL_VARIANTS))
     # for kernel_variant in [1, 3]:
-    for kernel_variant in variants:
-        for block_m in range(8, 65, 8):
+    for kernel_variant in [3]:
+        for block_m in range(8, 129, 8):
             for bn, wn in [(32, 8), (64, 4)]:
-                for stage in range(1, 5):
+                for stages in range(1, 6):
                     if num_tokens < block_m and block_m != 16:
                         continue
+                    if stages == 5 and block_m > 100:
+                        continue
                     sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(topk_ids, block_m, n_experts)
-                    configuration = f"{block_m=} {kernel_variant=}"
+                    configuration = f"{block_m=} {kernel_variant=}, {bn=}, {wn=}, {stages=}"
                     s_q, s_scale = sglang_per_token_group_quant_fp8(out_triton_swiglu, block_shape[1])
 
                     s_sc = s_scale.repeat_interleave(block_shape[0], 1)
@@ -236,7 +238,7 @@ def run_moe(topk_ids, eps=1e-10):
                     # out = my_ext.fused_moe_w8a8(x_q, x_scale, w2, w2_scale, sorted_token_ids, expert_ids, num_tokens_post_padded, 1, 0)
                     out = my_ext.fused_moe_w8a8_up_down(x_q, x_scale, w1_swiglu, w1_scale, w2, w2_scale, sorted_token_ids,
                                                         expert_ids, num_tokens_post_padded, topk_weights, top_k,
-                                                        kernel_variant, block_m, bn, wn, stage, 128, moe_config.routed_scaling_factor)
+                                                        kernel_variant, block_m, bn, wn, stages, 128, moe_config.routed_scaling_factor)
                     # out *= topk_weights.view((num_tokens*top_k, 1))
 
                     # print(out.shape)
@@ -302,7 +304,7 @@ def run_moe(topk_ids, eps=1e-10):
                     if profiling:
                         new_time = bench_fn(lambda: my_ext.fused_moe_w8a8_up_down(x_q, x_scale, w1_swiglu, w1_scale, w2, w2_scale, sorted_token_ids,
                                                         expert_ids, num_tokens_post_padded, topk_weights, top_k,
-                                                        kernel_variant, block_m, bn, wn, stage, 128, moe_config.routed_scaling_factor))
+                                                        kernel_variant, block_m, bn, wn, stages, 128, moe_config.routed_scaling_factor))
                         if kernel_variant < 3:
                             new_time += triton_time_merge
                         if new_time < best_time:
@@ -397,7 +399,6 @@ if __name__ == "__main__":
         print("Batch size", num_tokens)
         config_dtype = 'fp8_w8a8'
         config = try_get_optimal_moe_config(w1.shape, w2.shape, top_k, config_dtype, block_shape=block_shape, M=num_tokens)
-        print(config)
         topk_weights = torch.nn.functional.softmax(torch.randn((num_tokens, top_k), dtype=torch.float32), dim=-1)
 
         # Uniform
