@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, List, Optional
 
 import torch
 import triton.language as tl
+import alpha_kernel
 
 from sglang.srt.layers.moe.moe_runner import MoeRunnerConfig
 from sglang.srt.utils import (
@@ -28,7 +29,13 @@ from .fused_moe_triton_kernels import (
     moe_sum_reduce_triton,
     support_tensor_descriptor,
 )
+from sglang.srt.layers.quantization.fp8_kernel import (
+        sglang_per_token_group_quant_fp8,
+        )
 from .moe_align_block_size import moe_align_block_size
+
+import logging
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from sglang.srt.layers.moe.topk import StandardTopKOutput
@@ -405,6 +412,91 @@ def fused_experts_impl(
 
     num_tokens, _ = hidden_states.shape
     E, N, _ = w1.shape
+    batch_size = hidden_states.shape[0]
+    # if batch_size < 32:
+    block_m = 8
+    bn = 32
+    wn = 8
+    stages = 4
+    # elif batch_size < 128:
+    #     block_m = 8
+    #     bn = 64
+    #     wn = 4
+    #     stages = 2
+    # elif batch_size < 512:
+    #     block_m =16
+    #     bn = 64
+    #     wn = 4
+    #     stages = 2
+    # elif batch_size < 2048:
+    #     block_m = 32
+    #     bn = 32
+    #     wn = 8
+    #     stages = 3
+    # else:
+    #     block_m = 64
+    #     bn = 32
+    #     wn = 8
+    #     stages = 4
+    sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
+            topk_ids, block_m, E
+            )
+    A, A_scale = sglang_per_token_group_quant_fp8(hidden_states, block_shape[1])
+    def interleave_tensor(tensor):
+        """
+        Interleave a tensor of shape (M, 256, K) by alternating chunks of 8
+        from the first half (0-127) and second half (128-255) of dimension 1.
+        Args:
+            tensor: PyTorch tensor of shape (M, 256, K)
+        Returns:
+            Interleaved tensor of shape (M, 256, K)
+        """
+        M, _, K = tensor.shape
+
+        first_half = tensor[:, :128, :]
+        second_half = tensor[:, 128:, :]
+
+        first_chunks = first_half.view(M, 16, 8, K)
+        second_chunks = second_half.view(M, 16, 8, K)
+
+        interleaved = torch.stack([first_chunks, second_chunks], dim=2)
+        result = interleaved.view(M, 256, K)
+
+        return result.contiguous()
+    # out_custom = alpha_kernel.fused_moe_w8a8_up_down(A, A_scale, w1, w1_scale, w2, w2_scale, sorted_token_ids,
+                                                       #                                                     expert_ids, num_tokens_post_padded, topk_weights, 9,
+                                                       #                                                     3, block_m, bn, wn, stages, 128, routed_scaling_factor)
+    # if inplace:
+    #     hidden_states.copy_(out_custom)
+    # return out_custom
+    M = num_tokens
+    w1_swiglu = interleave_tensor(w1)
+    topk = 9
+
+    # cache = torch.empty(
+    #     num_tokens*100 * max(N, w2.shape[1]),
+    #     device=hidden_states.device,
+    #     dtype=hidden_states.dtype,
+    # )
+    # intermediate_cache3 = cache[: M * topk * w2.shape[1]].view(
+    #     (M, topk, w2.shape[1]),
+    # )
+    hidden_states *= 0
+    out_custom = alpha_kernel.fused_moe_w8a8_up_down(A, A_scale, w1_swiglu, w1_scale, w2, w2_scale, sorted_token_ids,
+                                                     expert_ids, num_tokens_post_padded, topk_weights, hidden_states,
+                                                     topk, 3, block_m, bn, wn, stages, 128, routed_scaling_factor)
+    # torch.cuda.synchronize()
+    # return out_hidden_states
+    # moe_sum_reduce_torch_compile(
+    #         out_custom.view(batch_size, 9, w2.shape[1]),
+    #         hidden_states,
+    #         routed_scaling_factor,)
+    # if inplace:
+    #     hidden_states.copy_(out_custom)
+    return hidden_states
+
+
+
     # We execute the fused_moe kernel in chunks to circumvent this issue:
     # https://github.com/vllm-project/vllm/issues/5938
     CHUNK_SIZE = 64 * 1024
@@ -646,7 +738,11 @@ def fused_experts_impl(
                 out_hidden_states[begin_chunk_idx:end_chunk_idx],
             )
 
-    return out_hidden_states
+    diff = torch.abs(out_custom-out_hidden_states.reshape(out_custom.shape))
+    mean_diff = diff.mean().item()
+    max_diff = diff.max().item()
+    logger.warning(f"{mean_diff=} {max_diff=} {out_custom.shape} {out_hidden_states.shape}")
+    return out_custom
 
 
 def fused_moe(
