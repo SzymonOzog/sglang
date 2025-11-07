@@ -2,8 +2,14 @@
 # Adapted from https://github.com/vllm-project/vllm/blob/a6221a144af772fd1a68fe7e627935dc53e81738/vllm/model_executor/layers/fused_moe/fused_moe.py
 
 """Fused MoE kernel."""
-
 from __future__ import annotations
+
+import alpha_kernel
+from alpha_kernel_python.utils import get_best_config
+from sglang.srt.layers.quantization.fp8_kernel import (
+        sglang_per_token_group_quant_fp8,
+        )
+
 
 import functools
 import os
@@ -403,8 +409,29 @@ def fused_experts_impl(
     assert w2.is_contiguous(), "Expert weights2 must be contiguous"
     assert hidden_states.dtype in [torch.float32, torch.float16, torch.bfloat16]
 
+
+
     num_tokens, _ = hidden_states.shape
     E, N, _ = w1.shape
+    M = num_tokens
+    topk = 9
+
+    local_conf = get_best_config("/sgl-workspace/sglang/alpha-kernel/moe_jit.json", M)
+    block_m = local_conf["block_m"]
+    bn = local_conf["block_n"]
+    wn = local_conf["warp_n"]
+    stages = local_conf["stages"]
+    A, A_scale = sglang_per_token_group_quant_fp8(hidden_states, block_shape[1])
+    hidden_states.zero_()
+
+    sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
+            topk_ids, block_m, E
+            )
+
+    torch.ops.alpha_kernel.fused_moe_w8a8_up_down(A, A_scale, w1, w1_scale, w2, w2_scale, sorted_token_ids,
+                                                     expert_ids, num_tokens_post_padded, topk_weights, hidden_states,
+                                                     topk, block_m, bn, wn, stages, 128, routed_scaling_factor)
+    return hidden_states
     # We execute the fused_moe kernel in chunks to circumvent this issue:
     # https://github.com/vllm-project/vllm/issues/5938
     CHUNK_SIZE = 64 * 1024

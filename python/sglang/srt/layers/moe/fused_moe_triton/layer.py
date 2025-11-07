@@ -54,6 +54,28 @@ from sglang.srt.utils import (
     is_hip,
     round_up,
 )
+def interleave_tensor(tensor):
+    """
+    Interleave a tensor of shape (M, 256, K) by alternating chunks of 8
+    from the first half (0-127) and second half (128-255) of dimension 1.
+    Args:
+        tensor: PyTorch tensor of shape (M, 256, K)
+    Returns:
+        Interleaved tensor of shape (M, 256, K)
+    """
+    M, _, K = tensor.shape
+
+    first_half = tensor[:, :128, :]
+    second_half = tensor[:, 128:, :]
+
+    first_chunks = first_half.view(M, 16, 8, K)
+    second_chunks = second_half.view(M, 16, 8, K)
+
+    interleaved = torch.stack([first_chunks, second_chunks], dim=2)
+    result = interleaved.view(M, 256, K)
+
+    return result.contiguous()
+
 
 if is_flashinfer_available():
     from flashinfer import RoutingMethodType, fp4_quantize
@@ -236,6 +258,8 @@ class FusedMoE(torch.nn.Module):
             isinstance(self.quant_method, Fp8MoEMethod)
             and get_moe_runner_backend().is_cutlass()
         )
+        self.w13_chunks_loaded = [0] * num_experts
+
 
     def _load_per_tensor_weight_scale(
         self,
@@ -749,6 +773,14 @@ class FusedMoE(torch.nn.Module):
                 expert_data=expert_data,
                 tp_rank=tp_rank,
             )
+            if shard_id in {"w1", "w3"}:
+                self.w13_chunks_loaded[expert_id] += 1
+            elif shard_id in {"w13"}:
+                self.w13_chunks_loaded[expert_id] += 2
+
+            if shard_id in {"w1", "w3", "w13"} and self.w13_chunks_loaded[expert_id] == 2:
+                _interleaved = interleave_tensor(expert_data.view((1,) + expert_data.shape))[0]
+                expert_data.copy_(_interleaved)
             return
 
     def weight_loader_fused(
