@@ -46,6 +46,7 @@ from sglang.srt.layers.quantization.modelopt_quant import ModelOptNvFp4FusedMoEM
 from sglang.srt.layers.quantization.unquant import UnquantizedFusedMoEMethod
 from sglang.srt.model_loader.weight_utils import narrow_padded_param_and_loaded_weight
 from sglang.srt.two_batch_overlap import MaybeTboDeepEPDispatcher
+from alpha_kernel_python.utils import interleave_tensor
 from sglang.srt.utils import (
     cpu_has_amx_support,
     get_bool_env_var,
@@ -54,27 +55,7 @@ from sglang.srt.utils import (
     is_hip,
     round_up,
 )
-def interleave_tensor(tensor):
-    """
-    Interleave a tensor of shape (M, 256, K) by alternating chunks of 8
-    from the first half (0-127) and second half (128-255) of dimension 1.
-    Args:
-        tensor: PyTorch tensor of shape (M, 256, K)
-    Returns:
-        Interleaved tensor of shape (M, 256, K)
-    """
-    M, _, K = tensor.shape
 
-    first_half = tensor[:, :128, :]
-    second_half = tensor[:, 128:, :]
-
-    first_chunks = first_half.view(M, 16, 8, K)
-    second_chunks = second_half.view(M, 16, 8, K)
-
-    interleaved = torch.stack([first_chunks, second_chunks], dim=2)
-    result = interleaved.view(M, 256, K)
-
-    return result.contiguous()
 
 
 if is_flashinfer_available():
@@ -259,6 +240,7 @@ class FusedMoE(torch.nn.Module):
             and get_moe_runner_backend().is_cutlass()
         )
         self.w13_chunks_loaded = [0] * num_experts
+        self.w13_scale_chunks_loaded = [0] * num_experts
 
 
     def _load_per_tensor_weight_scale(
@@ -739,6 +721,14 @@ class FusedMoE(torch.nn.Module):
                     expert_data=expert_data,
                     tp_rank=tp_rank,
                 )
+                if shard_id in {"w1", "w3"}:
+                    self.w13_scale_chunks_loaded[expert_id] += 1
+                elif shard_id in {"w13"}:
+                    self.w13_scale_chunks_loaded[expert_id] += 2
+
+                if shard_id in {"w1", "w3", "w13"} and self.w13_scale_chunks_loaded[expert_id] == 2:
+                    _interleaved = interleave_tensor(expert_data.view((1,) + expert_data.shape), 1)[0]
+                    expert_data.copy_(_interleaved)
             elif quant_method == FusedMoeWeightScaleSupported.TENSOR.value:
                 # INT4-FP8 (INT4 MoE Weight, FP8 Compute): Adjust FP8 per-tensor scaling number for e4m3fnuz (AMD)
                 if _is_hip and get_bool_env_var("SGLANG_INT4_WEIGHT"):

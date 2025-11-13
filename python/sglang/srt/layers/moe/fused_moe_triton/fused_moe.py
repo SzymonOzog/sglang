@@ -414,7 +414,7 @@ def fused_experts_impl(
     num_tokens, _ = hidden_states.shape
     E, N, _ = w1.shape
     M = num_tokens
-    topk = 9
+    topk = topk_ids.shape[1]
 
     local_conf = get_best_config("/sgl-workspace/sglang/alpha-kernel/moe_jit.json", M)
     block_m = local_conf["block_m"]
@@ -427,10 +427,11 @@ def fused_experts_impl(
     sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
             topk_ids, block_m, E
             )
+    routed_scaling_factor = routed_scaling_factor or 1.0
 
     torch.ops.alpha_kernel.fused_moe_w8a8_up_down(A, A_scale, w1, w1_scale, w2, w2_scale, sorted_token_ids,
                                                      expert_ids, num_tokens_post_padded, topk_weights, hidden_states,
-                                                     topk, block_m, bn, wn, stages, 128, routed_scaling_factor)
+                                                     topk, block_m, bn, wn, stages, routed_scaling_factor)
     return hidden_states
     # We execute the fused_moe kernel in chunks to circumvent this issue:
     # https://github.com/vllm-project/vllm/issues/5938
